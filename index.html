@@ -2505,36 +2505,31 @@ function renderSettings(mc) {
     </div>
   </div>
 
-  <!-- Cloud Sync -->
+  <!-- Data -->
   <div class="card" style="margin-bottom:20px">
-    <div class="card-header"><div class="card-title">☁ Cloud Sync (GitHub Gist)</div></div>
+    <div class="card-header"><div class="card-title">💾 Data & Cloud Sync</div></div>
     <div class="card-body">
-      <div class="alert alert-info" style="margin-bottom:14px">If the sync dot is <strong style="color:#ef4444">red</strong>, your GitHub token has expired. Generate a new one at <strong>github.com → Settings → Developer settings → Personal access tokens</strong> (needs <em>gist</em> scope, set to "No expiration"), then paste it below.</div>
-      <div class="form-row cols-2" style="margin-bottom:12px">
+      <p style="font-size:13px;font-weight:600;color:var(--navy);margin:0 0 8px">GitHub Token <span id="sync-dot-settings" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#6b7280;margin-left:4px"></span></p>
+      <p style="font-size:12px;color:var(--muted);margin:0 0 10px">If the sync dot in the nav is red, your token expired. Paste a new one below (github.com → Settings → Developer settings → Personal access tokens → gist scope, No expiration).</p>
+      <div class="form-row cols-2" style="margin-bottom:10px">
         <div class="form-group" style="margin:0">
           <label>GitHub Token</label>
-          <input type="password" id="s-gist-token" placeholder="ghp_xxxxxxxxxxxx" value="${esc(s.gistToken||'')}">
+          <input type="password" id="s-gist-token" placeholder="ghp_xxxxxxxxxxxx" value="${esc(s.gistToken||GIST_TOKEN)}">
         </div>
         <div class="form-group" style="margin:0">
           <label>Gist ID</label>
-          <input type="text" id="s-gist-id" placeholder="Gist ID" value="${esc(s.gistId||'')}">
+          <input type="text" id="s-gist-id" placeholder="Gist ID" value="${esc(s.gistId||GIST_ID)}">
         </div>
       </div>
-      <div style="display:flex;gap:8px;align-items:center">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px">
         <button class="btn btn-navy btn-sm" onclick="saveCloudSettings()">Save & Test Connection</button>
         <span id="cloud-test-result" style="font-size:12px;color:var(--muted)"></span>
       </div>
-    </div>
-  </div>
-
-  <!-- Data -->
-  <div class="card" style="margin-bottom:20px">
-    <div class="card-header"><div class="card-title">💾 Data Backup & Restore</div></div>
-    <div class="card-body">
+      <hr style="border:none;border-top:1px solid var(--border);margin:0 0 14px">
       <div class="form-row" style="gap:12px;flex-wrap:wrap">
         <button class="btn btn-navy btn-sm" onclick="exportBackup()">⬇ Download Backup (JSON)</button>
         <button class="btn btn-ghost btn-sm" onclick="document.getElementById('restore-file').click()">⬆ Restore from Backup</button>
-        <button class="btn btn-ghost btn-sm" onclick="saveToGist().then(()=>alert('Synced to cloud!'))">☁ Sync to Cloud Now</button>
+        <button class="btn btn-ghost btn-sm" onclick="saveToGist().then(()=>alert('Synced!'))">☁ Force Sync Now</button>
       </div>
       <input type="file" id="restore-file" accept=".json" style="display:none" onchange="restoreBackup(this)">
       <div id="backup-status" style="margin-top:8px;font-size:12px;color:var(--muted)"></div>
