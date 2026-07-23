@@ -61,6 +61,14 @@ td{padding:9px 12px;vertical-align:middle}
 .badge-inactive{background:#f3f4f6;color:var(--muted)}
 .tag{display:inline-block;padding:2px 7px;border-radius:4px;background:#f3f4f6;font-size:11px;font-weight:500;color:var(--text-sm)}
 .tier-badge{background:var(--gold);color:#7a5700;font-weight:700;padding:2px 8px;border-radius:20px;font-size:11px}
+.broker-perf-card.tier-80{border-color:#16a34a}
+.broker-perf-card.tier-80 .tier-badge{background:#16a34a;color:#fff}
+.broker-perf-card.tier-80 .progress-fill{background:linear-gradient(90deg,#16a34a,#4ade80)}
+.broker-perf-card.tier-80 .bname{color:#15803d}
+.broker-perf-card.tier-70{border-color:#7c3aed}
+.broker-perf-card.tier-70 .tier-badge{background:#7c3aed;color:#fff}
+.broker-perf-card.tier-70 .progress-fill{background:linear-gradient(90deg,#7c3aed,#a78bfa)}
+.broker-perf-card.tier-70 .bname{color:#6d28d9}
 .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:var(--radius);font-size:13px;font-weight:500;cursor:pointer;border:none;white-space:nowrap}
 .btn-primary{background:var(--red);color:#fff}.btn-primary:hover{background:var(--red-dark)}
 .btn-navy{background:var(--navy);color:#fff}.btn-navy:hover{background:var(--navy-dark)}
@@ -179,6 +187,7 @@ hr.divider{border:none;border-top:1px solid var(--border);margin:20px 0}
       <button class="nav-link" onclick="navigate('settings')">Settings</button>
     </div>
     <div class="nav-user">
+      <span id="sync-dot" title="Gist sync status" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#6b7280;margin-right:8px;flex-shrink:0;transition:background .4s"></span>
       <span class="nav-user-name" id="nav-username"></span>
       <button class="btn-logout" onclick="doLogout()">Sign Out</button>
     </div>
@@ -469,17 +478,22 @@ let _saving = false;
 async function saveToGist() {
   if (_saving) return;
   _saving = true;
+  // Stamp save time so we can pick the newest copy on load
+  state._lastSaved = new Date().toISOString();
   // Always write localStorage cache first so data survives Gist outages
   saveLocalCache();
+  updateGistStatus('saving');
   const gistId = state.settings.gistId || GIST_ID;
   const token  = state.settings.gistToken || GIST_TOKEN;
   try {
-    await fetch('https://api.github.com/gists/' + gistId, {
+    const r = await fetch('https://api.github.com/gists/' + gistId, {
       method: 'PATCH',
       headers: { Authorization: 'token ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(state, null, 2) } } }),
     });
-  } catch(e) { console.warn('Gist save failed:', e); }
+    if (r.ok) { updateGistStatus('ok'); }
+    else { console.warn('Gist save HTTP error:', r.status); updateGistStatus('error'); }
+  } catch(e) { console.warn('Gist save failed:', e); updateGistStatus('error'); }
   _saving = false;
 }
 
@@ -493,6 +507,15 @@ function saveLocalCache() {
   } catch(e) { console.warn('localStorage save failed:', e); }
 }
 
+function updateGistStatus(status) {
+  const dot = document.getElementById('sync-dot');
+  if (!dot) return;
+  if (status === 'ok')      { dot.style.background = '#22c55e'; dot.title = 'Synced to cloud'; }
+  else if (status === 'saving') { dot.style.background = '#f59e0b'; dot.title = 'Saving…'; }
+  else if (status === 'error')  { dot.style.background = '#ef4444'; dot.title = 'Cloud sync failed — data saved locally'; }
+  else if (status === 'warning'){ dot.style.background = '#f59e0b'; dot.title = 'Local data is newer than cloud — re-syncing'; }
+}
+
 async function loadFromGist() {
   const gistId = state.settings.gistId || GIST_ID;
   const token  = state.settings.gistToken || GIST_TOKEN;
@@ -500,19 +523,31 @@ async function loadFromGist() {
     const r = await fetch('https://api.github.com/gists/' + gistId, {
       headers: { Authorization: 'token ' + token },
     });
-    if (!r.ok) return false;
+    if (!r.ok) { updateGistStatus('error'); return false; }
     const data = await r.json();
     const file = data.files?.[GIST_FILE];
     if (!file?.content) return false;
     const loaded = JSON.parse(file.content);
-    // Merge loaded state, preserve current user session
-    const user = state.currentUser;
-    state = { ...loaded, currentUser: user, currentPage: state.currentPage, dashYear: loaded.dashYear || state.dashYear };
-    if (!state.settings.tiers) state.settings.tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS.map(t => ({...t, upTo: t.upTo === Infinity ? null : t.upTo}))));
-    // Cache to localStorage so app survives Gist outages / token expiry
-    saveLocalCache();
+    const gistTime  = loaded._lastSaved || '1970-01-01';
+    const localTime = state._lastSaved  || '1970-01-01';
+    const localHasData = (state.transactions || []).length > 0;
+    const gistHasData  = (loaded.transactions || []).length > 0;
+
+    if (!localHasData || gistTime >= localTime) {
+      // Gist is same age or newer (or local is empty) — use Gist
+      const user = state.currentUser;
+      state = { ...loaded, currentUser: user, currentPage: state.currentPage, dashYear: loaded.dashYear || state.dashYear };
+      if (!state.settings.tiers) state.settings.tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS.map(t => ({...t, upTo: t.upTo === Infinity ? null : t.upTo}))));
+      saveLocalCache();
+      updateGistStatus('ok');
+    } else {
+      // Local is NEWER than Gist — keep local, re-push to Gist to catch it up
+      console.warn('Local data is newer than Gist — re-syncing to cloud.');
+      updateGistStatus('warning');
+      saveToGist();
+    }
     return true;
-  } catch(e) { console.warn('Gist load failed:', e); return false; }
+  } catch(e) { console.warn('Gist load failed:', e); updateGistStatus('error'); return false; }
 }
 
 // ============================================================
@@ -556,6 +591,7 @@ function setLocalPasswordHash(user, hash) {
 
 function finishLogin(user) {
   state.currentUser = user;
+  try { localStorage.setItem('ct-session', user); } catch(e) {}
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app').style.display = 'block';
   document.getElementById('nav-username').textContent = user;
@@ -565,6 +601,7 @@ function finishLogin(user) {
 
 function doLogout() {
   state.currentUser = null;
+  try { localStorage.removeItem('ct-session'); } catch(e) {}
   document.getElementById('app').style.display = 'none';
   document.getElementById('login-screen').style.display = 'flex';
   document.getElementById('login-password').value = '';
@@ -764,24 +801,30 @@ function renderDashboard(mc) {
     const tpTxs = yearTxs.filter(t => (t.type||'').toLowerCase() === tp.toLowerCase());
     const tpLeases = countBy(tpTxs, t => (t.leaseSale||'').toLowerCase().includes('lease'));
     const tpSales  = countBy(tpTxs, t => (t.leaseSale||'').toLowerCase().includes('sale'));
-    summaryHtml += `<tr><td>${tp}</td><td>${tpLeases}</td><td>${tpSales}</td><td>${tpTxs.length}</td></tr>`;
+    const tpOther = tpTxs.length - tpLeases - tpSales;
+    summaryHtml += `<tr><td>${tp}</td><td>${tpLeases}</td><td>${tpSales}</td><td>${tpLeases+tpSales}${tpOther>0?` <span style="font-size:10px;color:var(--muted)">(+${tpOther})</span>`:''}</td></tr>`;
   }
-  summaryHtml += `<tr style="font-weight:700;background:var(--navy);color:#fff"><td>TOTAL</td><td>${leases}</td><td>${sales}</td><td>${yearTxs.length}</td></tr></tbody>`;
+  const otherCount = yearTxs.length - leases - sales;
+  summaryHtml += `<tr style="font-weight:700;background:var(--navy);color:#fff"><td>TOTAL</td><td>${leases}</td><td>${sales}</td><td>${leases+sales}${otherCount>0?` <span style="font-size:10px;opacity:.7">(+${otherCount} untyped)</span>`:''}</td></tr></tbody>`;
   document.getElementById('tx-summary').innerHTML = summaryHtml;
 
   // ── BROKER PERF CARDS
   const tiers = getTiers().sort((a,b)=>a.upTo-b.upTo);
   const maxTier = tiers[tiers.length-2]?.upTo || 275000;
   let cardsHtml = '';
-  for (const broker of state.brokers.filter(b=>b.active)) {
-    const stats = getBrokerYtdStats(broker.id, year);
+  const sortedBrokers = state.brokers
+    .filter(b => b.active)
+    .map(b => ({ broker: b, stats: getBrokerYtdStats(b.id, year) }))
+    .sort((a, b) => b.stats.ytdGross - a.stats.ytdGross);
+  for (const { broker, stats } of sortedBrokers) {
     const pendCount = state.transactions.filter(tx => getTxBrokerIds(tx).includes(broker.id) && tx.payments.some(p=>p.status==='pending')).length;
     const tierLabel = getCurrentTierLabel(stats.ytdGross);
     const nextThresh = getNextTierThreshold(stats.ytdGross);
     const pct = nextThresh ? Math.min(100, (stats.ytdGross / nextThresh) * 100) : 100;
     const toNext = nextThresh ? fmtD(nextThresh - stats.ytdGross) + ' to next tier' : 'Top tier reached';
+    const tierClass = tierLabel.startsWith('80') ? 'tier-80' : tierLabel.startsWith('70') ? 'tier-70' : '';
     cardsHtml += `
-      <div class="broker-perf-card">
+      <div class="broker-perf-card ${tierClass}">
         <div style="display:flex;align-items:center;justify-content:space-between">
           <div class="bname">${esc(broker.name)}</div>
           <span class="tier-badge">${tierLabel}</span>
@@ -2444,7 +2487,7 @@ function renderSettings(mc) {
       <div class="form-row" style="gap:12px;flex-wrap:wrap">
         <button class="btn btn-navy btn-sm" onclick="exportBackup()">⬇ Download Backup (JSON)</button>
         <button class="btn btn-ghost btn-sm" onclick="document.getElementById('restore-file').click()">⬆ Restore from Backup</button>
-        <button class="btn btn-ghost btn-sm" onclick="syncToGist()">☁ Sync to Cloud Now</button>
+        <button class="btn btn-ghost btn-sm" onclick="saveToGist().then(()=>alert('Synced to cloud!'))">☁ Sync to Cloud Now</button>
       </div>
       <input type="file" id="restore-file" accept=".json" style="display:none" onchange="restoreBackup(this)">
       <div id="backup-status" style="margin-top:8px;font-size:12px;color:var(--muted)"></div>
@@ -2601,8 +2644,8 @@ async function syncToGist() {
 }
 
 function saveAndSync() {
-  localStorage.setItem('ct-data', JSON.stringify({ transactions:state.transactions, brokers:state.brokers, settings:state.settings }));
-  syncToGist();
+  saveLocalCache();
+  saveToGist();
 }
 
 function loadLocalData() {
@@ -2629,20 +2672,22 @@ function completeLogin(user) {
 
 async function init() {
   loadLocalData();
-  // Set logos
   const loginLogo = document.getElementById('login-logo');
   const navLogo   = document.getElementById('nav-logo');
   if (loginLogo) loginLogo.src = LOGO_BLACK_LOGIN;
   if (navLogo)   navLogo.src   = LOGO_WHITE_NAV;
-  // Sync from Gist on load (don't overwrite password hashes with old data)
   await loadFromGist();
-  // Seed default password (NAIRed2026) for first-time users on this device
   const DEFAULT_HASH = 'f11eacaff47d9b9659a10c57b2bb7490496ec6a179dd0114c8abf67146ca90ba';
   if (!getLocalPasswordHash('Lauren')) setLocalPasswordHash('Lauren', DEFAULT_HASH);
   if (!getLocalPasswordHash('David'))  setLocalPasswordHash('David',  DEFAULT_HASH);
-  // Show login
-  document.getElementById('login-screen').style.display = 'flex';
-  document.getElementById('app').style.display = 'none';
+  // Restore session if previously logged in (skip login screen on refresh)
+  const savedUser = localStorage.getItem('ct-session');
+  if (savedUser && (savedUser === 'Lauren' || savedUser === 'David')) {
+    finishLogin(savedUser);
+  } else {
+    document.getElementById('login-screen').style.display = 'flex';
+    document.getElementById('app').style.display = 'none';
+  }
 }
 
 window.addEventListener('DOMContentLoaded', init);
