@@ -261,8 +261,10 @@ function resolveBrokerName(raw) {
     const canonical = BROKER_ALIASES[key];
     if (!canonical) return null; // NAI Red etc — skip
     // Get or create the broker by canonical name so imports always resolve correctly
-    let b = state.brokers.find(x => x.name === canonical);
+    // Case-insensitive so "Mcqueen" matches canonical "McQueen"
+    let b = state.brokers.find(x => x.name.toLowerCase() === canonical.toLowerCase());
     if (!b) { b = {id:makeId(), name:canonical, active:true, createdAt:new Date().toISOString()}; state.brokers.push(b); }
+    else if (b.name !== canonical) b.name = canonical; // fix capitalisation in-place
     return b;
   }
   return state.brokers.find(b => b.name.toLowerCase() === key) || null;
@@ -1661,9 +1663,9 @@ async function runImport() {
         const raw = String(row[C_BROKER]||'').trim();
         let obj = resolveBrokerName(raw);
         if (!obj && raw) {
-          const cap = raw.charAt(0).toUpperCase()+raw.slice(1).toLowerCase();
+          // Case-insensitive search first to avoid creating duplicates
           obj = state.brokers.find(b=>b.name.toLowerCase()===raw.toLowerCase());
-          if (!obj) { obj={id:makeId(),name:cap,email:'',active:false,createdAt:new Date().toISOString()}; state.brokers.push(obj); }
+          if (!obj) { obj={id:makeId(),name:raw.trim(),email:'',active:false,createdAt:new Date().toISOString()}; state.brokers.push(obj); }
         }
         return {row, broker: obj};
       });
@@ -2502,6 +2504,22 @@ function renderSettings(mc) {
           </tr>`).join('')}
         </tbody>
       </table></div>
+      ${state.brokers.length > 1 ? `<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+        <p style="font-size:12px;font-weight:600;color:var(--navy);margin:0 0 8px">Merge Duplicate Brokers</p>
+        <p style="font-size:12px;color:var(--muted);margin:0 0 10px">If a broker appears twice (e.g. "McQueen" and "Mcqueen"), merge the duplicate into the correct one.</p>
+        <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+          <div class="form-group" style="margin:0;flex:1;min-width:140px"><label style="font-size:11px">Duplicate (remove)</label>
+            <select id="merge-from" style="width:100%;padding:6px 8px;border:1.5px solid var(--border);border-radius:var(--radius);font-size:13px">
+              ${state.brokers.map(b=>'<option value="'+b.id+'">'+esc(b.name)+'</option>').join('')}
+            </select></div>
+          <div style="padding-bottom:4px;font-size:13px;color:var(--muted)">→ into →</div>
+          <div class="form-group" style="margin:0;flex:1;min-width:140px"><label style="font-size:11px">Canonical (keep)</label>
+            <select id="merge-into" style="width:100%;padding:6px 8px;border:1.5px solid var(--border);border-radius:var(--radius);font-size:13px">
+              ${state.brokers.map(b=>'<option value="'+b.id+'">'+esc(b.name)+'</option>').join('')}
+            </select></div>
+          <button class="btn btn-navy btn-sm" onclick="mergeBrokers()" style="flex-shrink:0">Merge</button>
+        </div>
+      </div>` : ''}
     </div>
   </div>
 
@@ -2552,6 +2570,31 @@ function renderSettings(mc) {
       </div>
     </div>
   </div>`;
+}
+
+async function mergeBrokers() {
+  const fromId = document.getElementById('merge-from').value;
+  const intoId = document.getElementById('merge-into').value;
+  if (!fromId || !intoId || fromId === intoId) { alert('Please select two different brokers.'); return; }
+  const fromB = state.brokers.find(b=>b.id===fromId);
+  const intoB = state.brokers.find(b=>b.id===intoId);
+  if (!fromB || !intoB) return;
+  if (!confirm(`Merge "${fromB.name}" into "${intoB.name}"? All transactions from "${fromB.name}" will be reassigned to "${intoB.name}" and the duplicate will be removed.`)) return;
+
+  // Re-point all transaction team/broker references from fromId → intoId
+  for (const tx of state.transactions) {
+    if (tx.brokerId === fromId) tx.brokerId = intoId;
+    if (tx.team) tx.team.forEach(m => { if (m.brokerId === fromId) m.brokerId = intoId; });
+    for (const pmt of (tx.payments||[])) {
+      if (pmt.brokerId === fromId) pmt.brokerId = intoId;
+      if (pmt.brokerAmounts) pmt.brokerAmounts.forEach(ba => { if (ba.brokerId === fromId) ba.brokerId = intoId; });
+    }
+  }
+  // Remove the duplicate broker record
+  state.brokers = state.brokers.filter(b => b.id !== fromId);
+  await saveToGist();
+  renderPage();
+  alert(`Done — "${fromB.name}" merged into "${intoB.name}".`);
 }
 
 async function saveCloudSettings() {
