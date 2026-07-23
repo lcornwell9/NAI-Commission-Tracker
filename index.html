@@ -428,7 +428,15 @@ function getBrokerYtdStats(brokerId, year) {
           const member = tx.team.find(m => m.brokerId === brokerId);
           share = member ? (member.pct / 100) : 0;
         }
-        allPmts.push({ tx, pmt, share, date: pmt.receivedDate || '' });
+        // Use exact per-broker amount if stored, otherwise use share%
+        let effectiveShare;
+        if (pmt.brokerAmounts) {
+          const ba = pmt.brokerAmounts.find(ba=>ba.brokerId===brokerId);
+          effectiveShare = ba !== undefined ? ba.amount / pmt.amount : 0; // absent = $0
+        } else {
+          effectiveShare = share;
+        }
+        allPmts.push({ tx, pmt, share: effectiveShare, date: pmt.receivedDate || '' });
       }
     }
     if (!seenTx.has(tx.id) && brokerIds.includes(brokerId)) {
@@ -1566,7 +1574,8 @@ async function runImport() {
     for (const g of Object.values(groups)) {
       // Determine brokers (team) from rows
       const team = [];
-      const brokersInGroup = g.brokerRows.map(row => {
+      // Build aligned row↔broker pairs first (before any filtering), then derive brokersInGroup
+      const rowBrokerMap = g.brokerRows.map(row => {
         const raw = String(row[C_BROKER]||'').trim();
         let obj = resolveBrokerName(raw);
         if (!obj && raw) {
@@ -1574,25 +1583,30 @@ async function runImport() {
           obj = state.brokers.find(b=>b.name.toLowerCase()===raw.toLowerCase());
           if (!obj) { obj={id:makeId(),name:cap,email:'',active:false,createdAt:new Date().toISOString()}; state.brokers.push(obj); }
         }
-        return obj;
-      }).filter(Boolean);
+        return {row, broker: obj};
+      });
+      const validPairs = rowBrokerMap.filter(p=>p.broker);
+      const brokersInGroup = validPairs.map(p=>p.broker);
 
       // Primary broker
       const primaryBroker = brokersInGroup[0];
       const brokerId = primaryBroker?.id || null;
+      const isTeamDeal = brokersInGroup.length > 1;
 
       // If multiple brokers, derive split % from each broker's actual V-AG + Col T amounts
-      if (brokersInGroup.length > 1) {
-        const brokerTotals = g.brokerRows.map(row => {
-          let t = Math.abs(parseFloat(row[C_PREV])||0);
-          for (let mi=0;mi<12;mi++) t+=Math.abs(parseFloat(row[C_MONTHS[mi]])||0);
+      if (isTeamDeal) {
+        const brokerTotals = validPairs.map(p => {
+          let t = Math.abs(parseFloat(p.row[C_PREV])||0);
+          for (let mi=0;mi<12;mi++) t+=Math.abs(parseFloat(p.row[C_MONTHS[mi]])||0);
           return t;
         });
         const grandTotal = brokerTotals.reduce((s,a)=>s+a,0);
         if (grandTotal > 0) {
           let sumPct = 0;
           brokersInGroup.forEach((b,i) => {
-            const pct = i===brokersInGroup.length-1 ? 100-sumPct : Math.round(brokerTotals[i]/grandTotal*100);
+            const pct = i===brokersInGroup.length-1
+              ? parseFloat((100-sumPct).toFixed(4))
+              : parseFloat((brokerTotals[i]/grandTotal*100).toFixed(4));
             team.push({brokerId:b.id, pct});
             sumPct += pct;
           });
@@ -1607,27 +1621,40 @@ async function runImport() {
       const payments = [];
 
       // Previously received (col T) — sum across all broker rows in this group
-      const prevAmt = g.brokerRows.reduce((s,row)=>s+Math.abs(parseFloat(row[C_PREV])||0),0);
+      const prevBrokerAmts = validPairs
+        .map(p=>({brokerId:p.broker.id, amount:Math.abs(parseFloat(p.row[C_PREV])||0)}))
+        .filter(ba=>ba.amount>0);
+      const prevAmt = prevBrokerAmts.reduce((s,ba)=>s+ba.amount,0);
       if (prevAmt > 0) {
-        payments.push({id:makeId(),status:'received',amount:prevAmt,receivedDate:`${detectedYear-1}-12-31`,notes:'Previously received (pre-'+detectedYear+')'});
+        payments.push({id:makeId(),status:'received',amount:prevAmt,
+          receivedDate:`${detectedYear-1}-12-31`,
+          notes:'Previously received (pre-'+detectedYear+')',
+          brokerAmounts: isTeamDeal ? prevBrokerAmts : undefined});
       }
 
-      // Monthly (cols V-AG)
+      // Monthly (cols V-AG) — store total + per-broker breakdown for exact reconciliation
       for (let m=0; m<12; m++) {
-        const monthAmt = g.brokerRows.reduce((s,row)=>s+Math.abs(parseFloat(row[C_MONTHS[m]])||0),0);
+        // Use validPairs to keep row↔broker indices aligned; filter $0 entries but keep array for team deals
+        const brokerAmounts = validPairs
+          .map(p=>({brokerId:p.broker.id, amount:Math.abs(parseFloat(p.row[C_MONTHS[m]])||0)}))
+          .filter(ba=>ba.amount>0);
+        const monthAmt = brokerAmounts.reduce((s,ba)=>s+ba.amount,0);
         if (monthAmt > 0) {
-          payments.push({id:makeId(),status:'received',amount:monthAmt,receivedDate:lastDayOfMonth(detectedYear,m+1)});
+          // For team deals, ALWAYS store brokerAmounts so reconciliation gets exact per-broker amounts
+          // (not just when >1 broker paid — months where only one broker is paid still need tagging)
+          payments.push({id:makeId(),status:'received',amount:monthAmt,
+            receivedDate:lastDayOfMonth(detectedYear,m+1),
+            brokerAmounts: isTeamDeal ? brokerAmounts : undefined});
         }
       }
 
       // Pending AR — store per-broker amounts so they match each broker's Col Q directly
-      for (let bi = 0; bi < g.brokerRows.length; bi++) {
-        const arRaw = parseFloat(g.brokerRows[bi][C_OS])||0;
+      for (const p of validPairs) {
+        const arRaw = parseFloat(p.row[C_OS])||0;
         if (arRaw < -1.0) {
-          const brokerForAR = brokersInGroup[bi];
           payments.push({
             id:makeId(), status:'pending', amount:Math.abs(arRaw),
-            brokerId: brokerForAR?.id || null,
+            brokerId: p.broker.id,
             notes:'Pending AR'
           });
         }
@@ -2096,8 +2123,16 @@ async function runReconciliation() {
         }
         if(pmt.status==='received'){
           const pmtYear=fiscalYearOf(pmt.receivedDate);
-          if(!pmtYear||pmtYear<year)prev+=pmt.amount*share;
-          else if(pmtYear===year)ytd+=pmt.amount*share;
+          // Use exact per-broker amount if available, otherwise fall back to share%
+          let amt;
+          if (pmt.brokerAmounts) {
+            const ba = pmt.brokerAmounts.find(ba=>ba.brokerId===b.id);
+            amt = ba !== undefined ? ba.amount : 0; // broker absent from brokerAmounts = $0 that period
+          } else {
+            amt = pmt.amount * share;
+          }
+          if(!pmtYear||pmtYear<year)prev+=amt;
+          else if(pmtYear===year)ytd+=amt;
         }
       }
     }
