@@ -469,6 +469,8 @@ let _saving = false;
 async function saveToGist() {
   if (_saving) return;
   _saving = true;
+  // Always write localStorage cache first so data survives Gist outages
+  saveLocalCache();
   const gistId = state.settings.gistId || GIST_ID;
   const token  = state.settings.gistToken || GIST_TOKEN;
   try {
@@ -479,6 +481,16 @@ async function saveToGist() {
     });
   } catch(e) { console.warn('Gist save failed:', e); }
   _saving = false;
+}
+
+function saveLocalCache() {
+  try {
+    localStorage.setItem('ct-data', JSON.stringify({
+      transactions: state.transactions,
+      brokers: state.brokers,
+      settings: state.settings
+    }));
+  } catch(e) { console.warn('localStorage save failed:', e); }
 }
 
 async function loadFromGist() {
@@ -497,6 +509,8 @@ async function loadFromGist() {
     const user = state.currentUser;
     state = { ...loaded, currentUser: user, currentPage: state.currentPage, dashYear: loaded.dashYear || state.dashYear };
     if (!state.settings.tiers) state.settings.tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS.map(t => ({...t, upTo: t.upTo === Infinity ? null : t.upTo}))));
+    // Cache to localStorage so app survives Gist outages / token expiry
+    saveLocalCache();
     return true;
   } catch(e) { console.warn('Gist load failed:', e); return false; }
 }
