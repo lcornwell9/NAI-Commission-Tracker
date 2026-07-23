@@ -413,7 +413,15 @@ function getBrokerYtdStats(brokerId, year) {
     const brokerIds = getTxBrokerIds(tx);
     if (!brokerIds.includes(brokerId)) continue;
     for (const pmt of tx.payments) {
-      if (pmt.status === 'pending') { pendingAR += pmt.amount; }
+      if (pmt.status === 'pending') {
+          // Use brokerId tag if present, otherwise apply team share
+          if (pmt.brokerId) { if (pmt.brokerId === brokerId) pendingAR += pmt.amount; }
+          else {
+            let ps = 1;
+            if (tx.team && tx.team.length > 0) { const m=tx.team.find(mm=>mm.brokerId===brokerId); ps=m?m.pct/100:1; }
+            pendingAR += pmt.amount * ps;
+          }
+        }
       if (pmt.status === 'received' && fiscalYearOf(pmt.receivedDate) === year) {
         let share = 1;
         if (tx.team && tx.team.length > 0) {
@@ -1612,9 +1620,17 @@ async function runImport() {
         }
       }
 
-      // Pending AR
-      if (g.outstanding > 0) {
-        payments.push({id:makeId(),status:'pending',amount:g.outstanding});
+      // Pending AR — store per-broker amounts so they match each broker's Col Q directly
+      for (let bi = 0; bi < g.brokerRows.length; bi++) {
+        const arRaw = parseFloat(g.brokerRows[bi][C_OS])||0;
+        if (arRaw < -1.0) {
+          const brokerForAR = brokersInGroup[bi];
+          payments.push({
+            id:makeId(), status:'pending', amount:Math.abs(arRaw),
+            brokerId: brokerForAR?.id || null,
+            notes:'Pending AR'
+          });
+        }
       }
 
       newTxs.push({
@@ -2073,7 +2089,11 @@ async function runReconciliation() {
       }
       if(share===0)continue;
       for(const pmt of tx.payments){
-        if(pmt.status==='pending')ar+=pmt.amount*share;
+        if(pmt.status==='pending'){
+          // Per-broker tagged: only count if it belongs to this broker
+          if(pmt.brokerId) { if(pmt.brokerId===b.id) ar+=pmt.amount; }
+          else ar+=pmt.amount*share; // legacy untagged: apply share
+        }
         if(pmt.status==='received'){
           const pmtYear=fiscalYearOf(pmt.receivedDate);
           if(!pmtYear||pmtYear<year)prev+=pmt.amount*share;
