@@ -1486,7 +1486,8 @@ function openImportModal() {
     <div class="form-group">
       <label>Import Mode</label>
       <select id="import-mode">
-        <option value="full">Full Year — import all transactions and payments</option>
+        <option value="full">Full Year — update matching properties, keep others</option>
+        <option value="replace">Replace All — wipe all existing transactions first (fresh import)</option>
         <option value="pending">Pending AR Only — import only outstanding AR (col Q negative)</option>
       </select>
     </div>
@@ -1648,11 +1649,18 @@ async function runImport() {
       groups[key].brokerRows.push(row);
     }
 
-    // Collect incoming property addresses to wipe
+    // Replace All mode: wipe everything first
+    if (mode === 'replace') {
+      state.transactions = [];
+      state.brokers = state.brokers.filter(b => b.active); // keep broker records, clear transactions
+    }
+    // Collect incoming property addresses to wipe (for Full Year mode)
     const incomingProps = new Set(Object.values(groups).map(g=>g.property.toLowerCase()));
-    state.transactions = state.transactions.filter(t =>
-      !t.importedPendingAR && !incomingProps.has((t.propertyAddress||'').toLowerCase())
-    );
+    if (mode !== 'replace') {
+      state.transactions = state.transactions.filter(t =>
+        !t.importedPendingAR && !incomingProps.has((t.propertyAddress||'').toLowerCase())
+      );
+    }
 
     const newTxs = [];
     for (const g of Object.values(groups)) {
