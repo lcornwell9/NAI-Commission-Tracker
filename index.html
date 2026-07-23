@@ -2505,6 +2505,28 @@ function renderSettings(mc) {
     </div>
   </div>
 
+  <!-- Cloud Sync -->
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-header"><div class="card-title">☁ Cloud Sync (GitHub Gist)</div></div>
+    <div class="card-body">
+      <div class="alert alert-info" style="margin-bottom:14px">If the sync dot is <strong style="color:#ef4444">red</strong>, your GitHub token has expired. Generate a new one at <strong>github.com → Settings → Developer settings → Personal access tokens</strong> (needs <em>gist</em> scope, set to "No expiration"), then paste it below.</div>
+      <div class="form-row cols-2" style="margin-bottom:12px">
+        <div class="form-group" style="margin:0">
+          <label>GitHub Token</label>
+          <input type="password" id="s-gist-token" placeholder="ghp_xxxxxxxxxxxx" value="${esc(s.gistToken||'')}">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label>Gist ID</label>
+          <input type="text" id="s-gist-id" placeholder="Gist ID" value="${esc(s.gistId||'')}">
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn btn-navy btn-sm" onclick="saveCloudSettings()">Save & Test Connection</button>
+        <span id="cloud-test-result" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+    </div>
+  </div>
+
   <!-- Data -->
   <div class="card" style="margin-bottom:20px">
     <div class="card-header"><div class="card-title">💾 Data Backup & Restore</div></div>
@@ -2535,6 +2557,33 @@ function renderSettings(mc) {
       </div>
     </div>
   </div>`;
+}
+
+async function saveCloudSettings() {
+  const token = document.getElementById('s-gist-token').value.trim();
+  const gistId = document.getElementById('s-gist-id').value.trim();
+  const result = document.getElementById('cloud-test-result');
+  if (!token || !gistId) { result.textContent = 'Please enter both token and Gist ID.'; result.style.color='var(--red)'; return; }
+  result.textContent = 'Testing…'; result.style.color='var(--muted)';
+  try {
+    const r = await fetch(`https://api.github.com/gists/${gistId}`, {
+      headers: { Authorization: 'token ' + token }
+    });
+    if (r.ok) {
+      state.settings.gistToken = token;
+      state.settings.gistId = gistId;
+      saveLocalCache();
+      await saveToGist();
+      result.textContent = '✓ Connected! Token saved.';
+      result.style.color = 'var(--success)';
+    } else {
+      result.textContent = `✗ Failed (${r.status}) — check your token and Gist ID.`;
+      result.style.color = 'var(--red)';
+    }
+  } catch(e) {
+    result.textContent = '✗ Network error — check your connection.';
+    result.style.color = 'var(--red)';
+  }
 }
 
 function saveCompanySettings() {
