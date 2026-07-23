@@ -680,7 +680,17 @@ function renderDashboard(mc) {
             const m = tx.team.find(m => m.brokerId === bid);
             share = m ? m.pct/100 : 0;
           }
-          allRecPmts.push({ tx, pmt, brokerId: bid, share, date: pmt.receivedDate||'' });
+          // Use exact per-broker amount when available (same logic as reconciliation)
+          let exactGross;
+          if (pmt.brokerAmounts) {
+            const ba = pmt.brokerAmounts.find(ba => ba.brokerId === bid);
+            exactGross = ba ? ba.amount : 0;
+          } else {
+            exactGross = pmt.amount * share;
+          }
+          if (exactGross > 0 || !pmt.brokerAmounts) {
+            allRecPmts.push({ tx, pmt, brokerId: bid, gross: exactGross, date: pmt.receivedDate||'' });
+          }
         }
       }
     }
@@ -688,9 +698,8 @@ function renderDashboard(mc) {
   allRecPmts.sort((a,b) => a.date.localeCompare(b.date));
 
   const seenTxForValue = new Set();
-  for (const { tx, pmt, brokerId, share } of allRecPmts) {
+  for (const { tx, pmt, brokerId, gross } of allRecPmts) {
     if (!brokerRunYtd[brokerId]) brokerRunYtd[brokerId] = 0;
-    const gross = pmt.amount * share;
     const split = calcSplit(brokerRunYtd[brokerId], gross);
     ytdGrossRec   += gross;
     ytdBrokerNet  += split.brokerAmount;
