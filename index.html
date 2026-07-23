@@ -793,19 +793,24 @@ function renderDashboard(mc) {
   </div>`;
 
   // ── TX SUMMARY
-  const leases = countBy(yearTxs, t => (t.leaseSale||'').toLowerCase().includes('lease'));
-  const sales   = countBy(yearTxs, t => (t.leaseSale||'').toLowerCase().includes('sale'));
-  const invSales = countBy(yearTxs, t => (t.useType||'').toLowerCase().includes('invest') && (t.leaseSale||'').toLowerCase().includes('sale'));
-  let summaryHtml = '<thead><tr><th>Type</th><th>Leases</th><th>Sales</th><th>Total</th></tr></thead><tbody>';
+  const isLease  = t => (t.leaseSale||'').toLowerCase().includes('lease');
+  const isSale   = t => (t.leaseSale||'').toLowerCase().includes('sale');
+  const isBOV    = t => (t.leaseSale||'') === 'BOV';
+  const isRefFee = t => (t.leaseSale||'') === 'Referral Fee';
+  const leases = countBy(yearTxs, isLease);
+  const sales  = countBy(yearTxs, isSale);
+  const bovs   = countBy(yearTxs, isBOV);
+  const refs   = countBy(yearTxs, isRefFee);
+  const knownTotal = leases + sales + bovs + refs;
+  let summaryHtml = '<thead><tr><th>Type</th><th>Leases</th><th>Sales</th><th>BOV</th><th>Referral Fee</th><th>Total</th></tr></thead><tbody>';
   for (const tp of types) {
-    const tpTxs = yearTxs.filter(t => (t.type||'').toLowerCase() === tp.toLowerCase());
-    const tpLeases = countBy(tpTxs, t => (t.leaseSale||'').toLowerCase().includes('lease'));
-    const tpSales  = countBy(tpTxs, t => (t.leaseSale||'').toLowerCase().includes('sale'));
-    const tpOther = tpTxs.length - tpLeases - tpSales;
-    summaryHtml += `<tr><td>${tp}</td><td>${tpLeases}</td><td>${tpSales}</td><td>${tpLeases+tpSales}${tpOther>0?` <span style="font-size:10px;color:var(--muted)">(+${tpOther})</span>`:''}</td></tr>`;
+    const tpTxs   = yearTxs.filter(t => (t.type||'').toLowerCase() === tp.toLowerCase());
+    const tpL = countBy(tpTxs, isLease), tpS = countBy(tpTxs, isSale);
+    const tpB = countBy(tpTxs, isBOV),  tpR = countBy(tpTxs, isRefFee);
+    const tpTotal = tpL + tpS + tpB + tpR;
+    summaryHtml += `<tr><td>${tp}</td><td>${tpL||'—'}</td><td>${tpS||'—'}</td><td>${tpB||'—'}</td><td>${tpR||'—'}</td><td>${tpTotal}</td></tr>`;
   }
-  const otherCount = yearTxs.length - leases - sales;
-  summaryHtml += `<tr style="font-weight:700;background:var(--navy);color:#fff"><td>TOTAL</td><td>${leases}</td><td>${sales}</td><td>${leases+sales}${otherCount>0?` <span style="font-size:10px;opacity:.7">(+${otherCount} untyped)</span>`:''}</td></tr></tbody>`;
+  summaryHtml += `<tr style="font-weight:700;background:var(--navy);color:#fff"><td>TOTAL</td><td>${leases}</td><td>${sales}</td><td>${bovs||'—'}</td><td>${refs||'—'}</td><td>${knownTotal}</td></tr></tbody>`;
   document.getElementById('tx-summary').innerHTML = summaryHtml;
 
   // ── BROKER PERF CARDS
@@ -919,7 +924,7 @@ function getAvailableYears() {
 // ============================================================
 // TRANSACTIONS PAGE
 // ============================================================
-let _txFilter = { search:'', broker:'', status:'' };
+let _txFilter = { search:'', broker:'', status:'', leaseSale:'' };
 
 function renderTransactions(mc) {
   const year = state.settings.fiscalYear || new Date().getFullYear();
@@ -942,6 +947,11 @@ function renderTransactions(mc) {
   });
   if (_txFilter.broker) txs = txs.filter(t => getTxBrokerIds(t).includes(_txFilter.broker));
   if (_txFilter.status) txs = txs.filter(t => getTxStatus(t) === _txFilter.status);
+  if (_txFilter.leaseSale === '__untyped__') txs = txs.filter(t => {
+    const v = (t.leaseSale||'').toLowerCase();
+    return !v.includes('lease') && !v.includes('sale') && v !== 'bov' && v !== 'referral fee';
+  });
+  else if (_txFilter.leaseSale) txs = txs.filter(t => (t.leaseSale||'').toLowerCase() === _txFilter.leaseSale.toLowerCase());
 
   mc.innerHTML = `
   <div class="page-header">
@@ -962,6 +972,7 @@ function renderTransactions(mc) {
       <option value="partial" ${_txFilter.status==='partial'?'selected':''}>Partial</option>
       <option value="complete" ${_txFilter.status==='complete'?'selected':''}>Complete</option>
     </select>
+    ${(()=>{ const untypedCount = state.transactions.filter(t=>{const v=(t.leaseSale||'').toLowerCase();return !v.includes('lease')&&!v.includes('sale')&&v!=='bov'&&v!=='referral fee';}).length; return untypedCount>0?`<select onchange="_txFilter.leaseSale=this.value;renderPage()" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--radius);font-size:13px;outline:none;border-color:${_txFilter.leaseSale==='__untyped__'?'var(--red)':'var(--border)'}"><option value="" ${!_txFilter.leaseSale?'selected':''}>All Types</option><option value="Lease" ${_txFilter.leaseSale==='Lease'?'selected':''}>Lease</option><option value="Sale" ${_txFilter.leaseSale==='Sale'?'selected':''}>Sale</option><option value="BOV" ${_txFilter.leaseSale==='BOV'?'selected':''}>BOV</option><option value="Referral Fee" ${_txFilter.leaseSale==='Referral Fee'?'selected':''}>Referral Fee</option><option value="__untyped__" ${_txFilter.leaseSale==='__untyped__'?'selected':''}>⚠ Untyped (${untypedCount})</option></select>`:'';})()}
     <span style="font-size:12px;color:var(--muted)">${txs.length} transaction${txs.length!==1?'s':''}</span>
   </div>
   <div class="card">
@@ -1242,8 +1253,11 @@ function txFormHtml(brokerOpts, tx) {
     </div>
     <div class="form-group"><label>Lease or Sale</label>
       <select id="tf-lease-sale">
+        <option value="" ${!tx?.leaseSale?'selected':''}>— Select —</option>
         <option ${tx?.leaseSale==='Lease'?'selected':''}>Lease</option>
         <option ${tx?.leaseSale==='Sale'?'selected':''}>Sale</option>
+        <option ${tx?.leaseSale==='BOV'?'selected':''}>BOV</option>
+        <option ${tx?.leaseSale==='Referral Fee'?'selected':''}>Referral Fee</option>
       </select>
     </div>
     <div class="form-group"><label>Use Type</label>
@@ -1506,6 +1520,17 @@ async function runImport() {
   const col = {};
   headers.forEach((h,i) => { if (h) col[String(h).toLowerCase().trim()] = i; });
 
+  // Normalize spreadsheet lease/sale values to canonical "Lease" or "Sale"
+  function normalizeLeaseSale(raw) {
+    const v = String(raw||'').trim().toLowerCase();
+    if (!v) return '';
+    if (v === 'l' || v.includes('lease') || v.includes('renewal') || v.includes('extension') || v.includes('sublease') || v.includes('assignment')) return 'Lease';
+    if (v === 's' || v.includes('sale') || v.includes('purchase') || v.includes('acquisition')) return 'Sale';
+    if (v.includes('bov') || v.includes('broker opinion')) return 'BOV';
+    if (v.includes('referral') || v.includes('ref fee') || v.includes('ref. fee')) return 'Referral Fee';
+    return String(raw).trim();
+  }
+
   // Column indices
   const C_BROKER   = col['associate'] ?? 0;
   const C_PROP     = col['property address'] ?? 1;
@@ -1577,7 +1602,7 @@ async function runImport() {
         id:makeId(), brokerId:brokerObj?.id||null, importedPendingAR:true,
         propertyAddress:String(row[C_PROP]||'').trim(),
         clientName:String(row[C_CLIENT]||'').trim(),
-        type:String(row[C_TYPE]||''), leaseSale:String(row[C_LEASE]||''),
+        type:String(row[C_TYPE]||''), leaseSale:normalizeLeaseSale(row[C_LEASE]),
         useType:String(row[C_USE]||''), sqFtg:parseFloat(row[C_SQFT])||null,
         transactionValue:Math.abs(parseFloat(row[C_TV])||0),
         totalCommission:Math.abs(parseFloat(row[C_COMMDUE])||0),
@@ -1607,7 +1632,7 @@ async function runImport() {
         try{closingDate=excelDateToISO(row[C_CLOSE],detectedYear);}catch(e){}
         groups[key] = {
           property:prop, buyerSeller:buyer,
-          type:String(row[C_TYPE]||''), leaseSale:String(row[C_LEASE]||''),
+          type:String(row[C_TYPE]||''), leaseSale:normalizeLeaseSale(row[C_LEASE]),
           useType:String(row[C_USE]||''), sqFtg:parseFloat(row[C_SQFT])||null,
           transactionValue:parseFloat(row[C_TV])||0,
           grossCommDue:parseFloat(row[C_COMMDUE])||0,
