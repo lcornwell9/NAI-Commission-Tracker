@@ -318,7 +318,19 @@ async function hashPass(pw) {
 // ============================================================
 // SPLIT CALCULATION (running YTD tier logic)
 // ============================================================
-function calcSplit(ytdBefore, amount) {
+function getBrokerOverridePct(brokerId) {
+  if (!brokerId) return null;
+  const b = state.brokers.find(b => b.id === brokerId);
+  return (b && b.customSplitPct != null) ? b.customSplitPct : null;
+}
+
+function calcSplit(ytdBefore, amount, overridePct) {
+  // If broker has a custom fixed split, bypass tiers entirely
+  if (overridePct != null) {
+    const brokerAmount  = Math.round(amount * overridePct / 100 * 100) / 100;
+    const companyAmount = Math.round((amount - brokerAmount) * 100) / 100;
+    return { brokerAmount, companyAmount, effectiveSplit: overridePct + '%/' + (100 - overridePct) + '%' };
+  }
   const tiers = getTiers().sort((a,b) => a.upTo - b.upTo);
   let remaining = amount, brokerAmount = 0, companyAmount = 0, runYtd = ytdBefore;
 
@@ -464,7 +476,7 @@ function getBrokerYtdStats(brokerId, year) {
   let runYtd = 0;
   for (const { pmt, share } of allPmts) {
     const gross = pmt.amount * share;
-    const split = calcSplit(runYtd, gross);
+    const split = calcSplit(runYtd, gross, getBrokerOverridePct(brokerId));
     ytdGross     += gross;
     ytdBrokerNet += split.brokerAmount;
     ytdCompanyNet += split.companyAmount;
@@ -707,7 +719,7 @@ function renderDashboard(mc) {
   const seenTxForValue = new Set();
   for (const { tx, pmt, brokerId, gross } of allRecPmts) {
     if (!brokerRunYtd[brokerId]) brokerRunYtd[brokerId] = 0;
-    const split = calcSplit(brokerRunYtd[brokerId], gross);
+    const split = calcSplit(brokerRunYtd[brokerId], gross, getBrokerOverridePct(brokerId));
     ytdGrossRec   += gross;
     ytdBrokerNet  += split.brokerAmount;
     ytdCompanyNet += split.companyAmount;
@@ -1046,7 +1058,7 @@ function buildTxRows(txs) {
         let share = 1;
         if (isTeam) { const m=tx.team.find(mm=>mm.brokerId===bid); share=m?m.pct/100:0; }
         const ytd = getBrokerRunningYtd(bid, fiscalYearOf(pmt.receivedDate)||year, pmt.id);
-        brokerNetTotal += calcSplit(ytd, pmt.amount*share).brokerAmount;
+        brokerNetTotal += calcSplit(ytd, pmt.amount*share, getBrokerOverridePct(bid)).brokerAmount;
       }
     }
 
@@ -1098,7 +1110,7 @@ function buildSubRows(tx, isTeam) {
         const share = member.pct / 100;
         const gross = pmt.amount * share;
         const ytd = isRec ? getBrokerRunningYtd(member.brokerId, pmtYear, pmt.id) : 0;
-        const split = calcSplit(ytd, gross);
+        const split = calcSplit(ytd, gross, getBrokerOverridePct(member.brokerId));
         const bn = isRec ? split.brokerAmount : null;
         const cn = isRec ? split.companyAmount : null;
         html += `<tr class="sub-row sub-${tx.id} hidden">
@@ -1115,7 +1127,7 @@ function buildSubRows(tx, isTeam) {
     } else {
       const bid = tx.brokerId || (brokerIds[0]||'');
       const ytd = isRec ? getBrokerRunningYtd(bid, pmtYear, pmt.id) : 0;
-      const split = calcSplit(ytd, pmt.amount);
+      const split = calcSplit(ytd, pmt.amount, getBrokerOverridePct(bid));
       const bn = isRec ? split.brokerAmount : null;
       html += `<tr class="sub-row sub-${tx.id} hidden">
         <td></td>
@@ -1183,7 +1195,7 @@ function updateMrCalc(txId) {
     if (isTeam) { const m=tx.team.find(mm=>mm.brokerId===bid); share=m?m.pct/100:0; }
     const gross = amount * share;
     const ytd = getBrokerRunningYtd(bid, pmtYear, pmtId);
-    const split = calcSplit(ytd, gross);
+    const split = calcSplit(ytd, gross, getBrokerOverridePct(bid));
     calcHtml += `<div style="margin-bottom:6px"><strong>${esc(broker?.name||'?')}</strong>${isTeam?` (${Math.round(share*100)}%)`:''}:
       Gross ${fmtD(gross)} → Broker Net <strong style="color:var(--success)">${fmtD(split.brokerAmount)}</strong> · Company ${fmtD(split.companyAmount)} · Split <span class="tag">${split.effectiveSplit}</span></div>`;
   }
@@ -1212,7 +1224,7 @@ async function saveMarkReceived(txId) {
     if (isTeam){const m=tx.team.find(mm=>mm.brokerId===bid);share=m?m.pct/100:0;}
     const gross=amount*share;
     const ytd=getBrokerRunningYtd(bid,pmtYear,pmtId);
-    const split=calcSplit(ytd,gross);
+    const split=calcSplit(ytd,gross,getBrokerOverridePct(bid));
     brokerNet+=split.brokerAmount; companyNet+=split.companyAmount; effectiveSplit=split.effectiveSplit;
   }
   pmt.status='received'; pmt.amount=amount; pmt.receivedDate=dateStr; pmt.notes=notes;
@@ -1827,7 +1839,7 @@ function renderBrokers(mc) {
     return `<tr>
       <td><strong>${esc(b.name)}</strong><div class="edited-meta">${b.createdAt ? 'Added ' + fmtDate(b.createdAt.slice(0,10)) : ''}</div></td>
       <td class="td-mono">${fmtD(stats.ytdGross)}</td>
-      <td><span class="tier-badge">${tierLabel}</span></td>
+      <td>${b.customSplitPct != null ? `<span class="tier-badge" style="background:#7c3aed;color:#fff">${b.customSplitPct}/${100-b.customSplitPct} Custom</span>` : `<span class="tier-badge">${tierLabel}</span>`}</td>
       <td class="td-mono" style="color:var(--success)">${fmtD(stats.ytdBrokerNet)}</td>
       <td class="td-mono">${fmtD(stats.ytdCompanyNet)}</td>
       <td class="td-mono" style="color:${stats.pendingAR>0?'var(--danger)':'var(--muted)'}">${stats.pendingAR>0?fmtD(stats.pendingAR):'—'}</td>
@@ -1872,6 +1884,10 @@ function openAddBrokerModal() {
     <div class="form-group"><label>Status</label>
       <select id="br-active"><option value="1">Active</option><option value="0">Inactive</option></select>
     </div>
+    <div class="form-group">
+      <label>Custom Broker Split % <span style="font-weight:400;color:var(--muted)">(leave blank to use standard tiers)</span></label>
+      <input id="br-custom-split" type="number" min="0" max="100" step="1" placeholder="e.g. 90 for a fixed 90/10 split">
+    </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveNewBroker()">Add Broker</button>
@@ -1886,6 +1902,10 @@ function openEditBrokerModal(id) {
     <div class="form-group"><label>Status</label>
       <select id="br-active"><option value="1" ${b.active?'selected':''}>Active</option><option value="0" ${!b.active?'selected':''}>Inactive</option></select>
     </div>
+    <div class="form-group">
+      <label>Custom Broker Split % <span style="font-weight:400;color:var(--muted)">(leave blank to use standard tiers)</span></label>
+      <input id="br-custom-split" type="number" min="0" max="100" step="1" placeholder="e.g. 90 for a fixed 90/10 split" value="${b.customSplitPct != null ? b.customSplitPct : ''}">
+    </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveEditBroker('${id}')">Save Changes</button>
@@ -1895,7 +1915,11 @@ function openEditBrokerModal(id) {
 async function saveNewBroker() {
   const name = document.getElementById('br-name').value.trim();
   if (!name) { alert('Name is required.'); return; }
-  state.brokers.push({ id:makeId(), name, active: document.getElementById('br-active').value==='1', createdAt:new Date().toISOString() });
+  const customSplitRaw = document.getElementById('br-custom-split')?.value.trim();
+  const customSplitPct = customSplitRaw !== '' ? parseFloat(customSplitRaw) : null;
+  const broker = { id:makeId(), name, active: document.getElementById('br-active').value==='1', createdAt:new Date().toISOString() };
+  if (customSplitPct != null && !isNaN(customSplitPct)) broker.customSplitPct = customSplitPct;
+  state.brokers.push(broker);
   closeModal(); await saveToGist(); renderPage();
 }
 
@@ -1904,6 +1928,12 @@ async function saveEditBroker(id) {
   if (!b) return;
   b.name   = document.getElementById('br-name').value.trim();
   b.active = document.getElementById('br-active').value === '1';
+  const customSplitRaw = document.getElementById('br-custom-split')?.value.trim();
+  if (customSplitRaw !== '' && customSplitRaw != null) {
+    b.customSplitPct = parseFloat(customSplitRaw);
+  } else {
+    delete b.customSplitPct;
+  }
   closeModal(); await saveToGist(); renderPage();
 }
 
@@ -2024,7 +2054,7 @@ function generateBrokerAudit() {
       for (const pmt of recPmts) {
         const pmtYear = fiscalYearOf(pmt.receivedDate)||year;
         const ytd = getBrokerRunningYtd(broker.id, pmtYear, pmt.id);
-        brokerPaid += calcSplit(ytd, pmt.amount*share).brokerAmount;
+        brokerPaid += calcSplit(ytd, pmt.amount*share, getBrokerOverridePct(broker.id)).brokerAmount;
       }
 
       // Effective split
@@ -2334,7 +2364,7 @@ async function downloadBrokerAuditXLSX() {
       const grossRec=recPmts.reduce((s,p)=>s+p.amount*share,0);
       const pendAR=pendPmts.reduce((s,p)=>s+p.amount,0);
       let brokerPaid=0;
-      for(const pmt of recPmts){const ytd=getBrokerRunningYtd(broker.id,fiscalYearOf(pmt.receivedDate)||year,pmt.id);brokerPaid+=calcSplit(ytd,pmt.amount*share).brokerAmount;}
+      for(const pmt of recPmts){const ytd=getBrokerRunningYtd(broker.id,fiscalYearOf(pmt.receivedDate)||year,pmt.id);brokerPaid+=calcSplit(ytd,pmt.amount*share,getBrokerOverridePct(broker.id)).brokerAmount;}
       const grossComm=(tx.totalCommission||0)*share;
       const effSplit=getCurrentTierLabel(getBrokerRunningYtd(broker.id,year,null));
       totTV+=(tx.transactionValue||0)*share;totDue+=grossComm;totRec+=grossRec;totBN+=brokerPaid;totAR+=pendAR;
