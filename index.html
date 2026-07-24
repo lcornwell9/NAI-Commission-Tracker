@@ -478,7 +478,7 @@ function getBrokerYtdStats(brokerId, year) {
 // ============================================================
 let _saving = false;
 async function saveToGist() {
-  if (_saving) return;
+  if (_saving) return false;
   _saving = true;
   // Stamp save time so we can pick the newest copy on load
   state._lastSaved = new Date().toISOString();
@@ -487,16 +487,18 @@ async function saveToGist() {
   updateGistStatus('saving');
   const gistId = state.settings.gistId || GIST_ID;
   const token  = state.settings.gistToken || GIST_TOKEN;
+  let success = false;
   try {
     const r = await fetch('https://api.github.com/gists/' + gistId, {
       method: 'PATCH',
       headers: { Authorization: 'token ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(state, null, 2) } } }),
     });
-    if (r.ok) { updateGistStatus('ok'); }
-    else { console.warn('Gist save HTTP error:', r.status); updateGistStatus('error'); }
+    if (r.ok) { updateGistStatus('ok'); success = true; }
+    else { console.warn('Gist save HTTP error:', r.status, 'gistId:', gistId, 'token prefix:', token.slice(0,8)); updateGistStatus('error'); }
   } catch(e) { console.warn('Gist save failed:', e); updateGistStatus('error'); }
   _saving = false;
+  return success;
 }
 
 function saveLocalCache() {
@@ -538,7 +540,12 @@ async function loadFromGist() {
     if (!localHasData || gistTime >= localTime) {
       // Gist is same age or newer (or local is empty) — use Gist
       const user = state.currentUser;
+      // Preserve locally-stored credentials — never let Gist data overwrite them
+      const savedToken  = localStorage.getItem('ct-cloud-token')  || state.settings.gistToken;
+      const savedGistId = localStorage.getItem('ct-cloud-gistid') || state.settings.gistId;
       state = { ...loaded, currentUser: user, currentPage: state.currentPage, dashYear: loaded.dashYear || state.dashYear };
+      if (savedToken)  state.settings.gistToken = savedToken;
+      if (savedGistId) state.settings.gistId    = savedGistId;
       if (!state.settings.tiers) state.settings.tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS.map(t => ({...t, upTo: t.upTo === Infinity ? null : t.upTo}))));
       saveLocalCache();
       updateGistStatus('ok');
@@ -2627,10 +2634,18 @@ async function saveCloudSettings() {
     if (r.ok) {
       state.settings.gistToken = token;
       state.settings.gistId = gistId;
+      // Store credentials separately so Gist loads can never overwrite them
+      localStorage.setItem('ct-cloud-token',  token);
+      localStorage.setItem('ct-cloud-gistid', gistId);
       saveLocalCache();
-      await saveToGist();
-      result.textContent = '✓ Connected! Token saved.';
-      result.style.color = 'var(--success)';
+      const saved = await saveToGist();
+      if (saved) {
+        result.textContent = '✓ Connected! Token saved and synced.';
+        result.style.color = 'var(--success)';
+      } else {
+        result.textContent = '✗ Token valid for reading but Gist write failed. Make sure your token has "gist" write scope and owns this Gist.';
+        result.style.color = 'var(--red)';
+      }
     } else {
       result.textContent = `✗ Failed (${r.status}) — check your token and Gist ID.`;
       result.style.color = 'var(--red)';
