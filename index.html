@@ -503,10 +503,16 @@ async function saveToGist() {
       body: JSON.stringify(state),
     });
     if (r.ok) { updateGistStatus('ok'); success = true; }
-    else { console.warn('JSONBin save error:', r.status); updateGistStatus('error'); }
-  } catch(e) { console.warn('JSONBin save failed:', e); updateGistStatus('error'); }
+    else {
+      const body = await r.text().catch(()=>'');
+      console.warn('JSONBin save error:', r.status, body);
+      updateGistStatus('error');
+      _saving = false;
+      return { ok: false, status: r.status, body };
+    }
+  } catch(e) { console.warn('JSONBin save failed:', e); updateGistStatus('error'); _saving = false; return { ok: false, status: 0, body: e.message }; }
   _saving = false;
-  return success;
+  return { ok: true };
 }
 
 function saveLocalCache() {
@@ -2658,11 +2664,13 @@ async function saveCloudSettings() {
       localStorage.setItem('ct-cloud-gistid', binId);
       saveLocalCache();
       const saved = await saveToGist();
-      if (saved) {
+      if (saved && saved.ok) {
         result.textContent = '✓ Connected! Synced successfully.';
         result.style.color = 'var(--success)';
       } else {
-        result.textContent = '✗ Read OK but write failed — check your Master Key permissions.';
+        const code = saved ? saved.status : '?';
+        const body = saved ? saved.body : '';
+        result.textContent = `✗ Write failed (HTTP ${code}) — ${body || 'check Master Key and Bin ID'}`;
         result.style.color = 'var(--red)';
       }
     } else {
