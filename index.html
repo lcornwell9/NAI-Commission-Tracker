@@ -502,10 +502,12 @@ async function saveToGist() {
   const gistId = localStorage.getItem('ct-cloud-gistid') || state.settings.gistId || GIST_ID;
   let success = false;
   try {
+    // NEVER write the token into the Gist — GitHub scans Gist content and revokes any token it finds
+    const stateToSave = { ...state, settings: { ...state.settings, gistToken: undefined } };
     const r = await fetch('https://api.github.com/gists/' + gistId, {
       method: 'PATCH',
       headers: { Authorization: 'token ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(state, null, 2) } } }),
+      body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(stateToSave, null, 2) } } }),
     });
     if (r.ok) { updateGistStatus('ok'); success = true; }
     else { console.warn('Gist save HTTP error:', r.status, 'gistId:', gistId, 'token prefix:', token.slice(0,8)); updateGistStatus('error'); }
