@@ -503,16 +503,10 @@ async function saveToGist() {
       body: JSON.stringify(state),
     });
     if (r.ok) { updateGistStatus('ok'); success = true; }
-    else {
-      const body = await r.text().catch(()=>'');
-      console.warn('JSONBin save error:', r.status, body);
-      updateGistStatus('error');
-      _saving = false;
-      return { ok: false, status: r.status, body };
-    }
-  } catch(e) { console.warn('JSONBin save failed:', e); updateGistStatus('error'); _saving = false; return { ok: false, status: 0, body: e.message }; }
+    else { console.warn('JSONBin save error:', r.status); updateGistStatus('error'); }
+  } catch(e) { console.warn('JSONBin save failed:', e); updateGistStatus('error'); }
   _saving = false;
-  return { ok: true };
+  return success;
 }
 
 function saveLocalCache() {
@@ -551,17 +545,20 @@ async function loadFromGist() {
     const cloudTime = loaded._lastSaved || '1970-01-01';
     const localTime = state._lastSaved  || '1970-01-01';
     const localHasData = (state.transactions || []).length > 0;
+    const cloudHasData = (loaded.transactions || []).length > 0;
 
-    if (!localHasData || cloudTime >= localTime) {
+    // Only use cloud data if cloud actually has data AND is newer (or local is empty)
+    if (cloudHasData && (!localHasData || cloudTime >= localTime)) {
       const user = state.currentUser;
       state = { ...loaded, currentUser: user, currentPage: state.currentPage, dashYear: loaded.dashYear || state.dashYear };
-      state.settings.gistToken = undefined;
+      if (state.settings) state.settings.gistToken = undefined;
+      if (!state.settings) state.settings = {};
       if (!state.settings.tiers) state.settings.tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS.map(t => ({...t, upTo: t.upTo === Infinity ? null : t.upTo}))));
       saveLocalCache();
       updateGistStatus('ok');
     } else {
-      // Local is NEWER than Gist — keep local, re-push to Gist to catch it up
-      console.warn('Local data is newer than Gist — re-syncing to cloud.');
+      // Local is newer or cloud is empty — keep local, push to cloud
+      console.warn('Local data preferred — re-syncing to cloud.');
       updateGistStatus('warning');
       saveToGist();
     }
@@ -2664,13 +2661,11 @@ async function saveCloudSettings() {
       localStorage.setItem('ct-cloud-gistid', binId);
       saveLocalCache();
       const saved = await saveToGist();
-      if (saved && saved.ok) {
+      if (saved) {
         result.textContent = '✓ Connected! Synced successfully.';
         result.style.color = 'var(--success)';
       } else {
-        const code = saved ? saved.status : '?';
-        const body = saved ? saved.body : '';
-        result.textContent = `✗ Write failed (HTTP ${code}) — ${body || 'check Master Key and Bin ID'}`;
+        result.textContent = '✗ Read OK but write failed — check your Master Key and Bin ID.';
         result.style.color = 'var(--red)';
       }
     } else {
