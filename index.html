@@ -549,13 +549,21 @@ async function loadFromGist() {
 
     // Only use cloud data if cloud actually has data AND is newer (or local is empty)
     if (cloudHasData && (!localHasData || cloudTime >= localTime)) {
-      const user = state.currentUser;
-      state = { ...loaded, currentUser: user, currentPage: state.currentPage, dashYear: loaded.dashYear || state.dashYear };
-      if (state.settings) state.settings.gistToken = undefined;
-      if (!state.settings) state.settings = {};
-      if (!state.settings.tiers) state.settings.tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS.map(t => ({...t, upTo: t.upTo === Infinity ? null : t.upTo}))));
-      saveLocalCache();
-      updateGistStatus('ok');
+      const prevState = state; // keep backup in case merge fails
+      try {
+        const user = state.currentUser;
+        state = { ...loaded, currentUser: user, currentPage: state.currentPage, dashYear: loaded.dashYear || state.dashYear };
+        if (!state.settings) state.settings = {};
+        state.settings.gistToken = undefined;
+        if (!state.settings.tiers) state.settings.tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS.map(t => ({...t, upTo: t.upTo === Infinity ? null : t.upTo}))));
+        saveLocalCache();
+        updateGistStatus('ok');
+      } catch(mergeErr) {
+        console.warn('Cloud merge failed, keeping local data:', mergeErr);
+        state = prevState;
+        updateGistStatus('warning');
+        saveToGist();
+      }
     } else {
       // Local is newer or cloud is empty — keep local, push to cloud
       console.warn('Local data preferred — re-syncing to cloud.');
