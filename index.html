@@ -219,7 +219,7 @@ const LOGO_BLACK_LOGIN = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABmIAAAIa
 // CONSTANTS
 // ============================================================
 const GIST_ID    = '3383de334160a56bed19c0638234ce11';
-const GIST_TOKEN = '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';
+const GIST_TOKEN = ''; // Token is stored in browser localStorage only — never hardcode here
 const GIST_FILE  = 'commission-tracker-data.json';
 
 const DEFAULT_TIERS = [
@@ -497,8 +497,9 @@ async function saveToGist() {
   // Always write localStorage cache first so data survives Gist outages
   saveLocalCache();
   updateGistStatus('saving');
-  const gistId = state.settings.gistId || GIST_ID;
-  const token  = state.settings.gistToken || GIST_TOKEN;
+  // Always prefer the separately-stored credential — it can never be overwritten by Gist data
+  const token  = localStorage.getItem('ct-cloud-token')  || state.settings.gistToken  || GIST_TOKEN;
+  const gistId = localStorage.getItem('ct-cloud-gistid') || state.settings.gistId || GIST_ID;
   let success = false;
   try {
     const r = await fetch('https://api.github.com/gists/' + gistId, {
@@ -533,8 +534,9 @@ function updateGistStatus(status) {
 }
 
 async function loadFromGist() {
-  const gistId = state.settings.gistId || GIST_ID;
-  const token  = state.settings.gistToken || GIST_TOKEN;
+  // Always prefer the separately-stored credential — it can never be overwritten by Gist data
+  const token  = localStorage.getItem('ct-cloud-token')  || state.settings.gistToken  || GIST_TOKEN;
+  const gistId = localStorage.getItem('ct-cloud-gistid') || state.settings.gistId || GIST_ID;
   try {
     const r = await fetch('https://api.github.com/gists/' + gistId, {
       headers: { Authorization: 'token ' + token },
