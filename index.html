@@ -218,9 +218,8 @@ const LOGO_BLACK_LOGIN = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABmIAAAIa
 // ============================================================
 // CONSTANTS
 // ============================================================
-const GIST_ID    = '3383de334160a56bed19c0638234ce11';
-const GIST_TOKEN = ''; // Token is stored in browser localStorage only — never hardcode here
-const GIST_FILE  = 'commission-tracker-data.json';
+const BIN_ID  = '';  // JSONBin Bin ID — set in Settings
+const BIN_KEY = '';  // JSONBin Master Key — set in Settings
 
 const DEFAULT_TIERS = [
   { upTo: 140000,   brokerPct: 0.60, companyPct: 0.40 },
@@ -284,8 +283,6 @@ let state = {
     fiscalYear: new Date().getFullYear(),
     tiers: JSON.parse(JSON.stringify(DEFAULT_TIERS.map(t => ({...t, upTo: t.upTo === Infinity ? null : t.upTo})))),
     users: { Lauren: { passwordHash: '' }, David: { passwordHash: '' } },
-    gistId: GIST_ID,
-    gistToken: GIST_TOKEN,
   },
 };
 
@@ -486,42 +483,40 @@ function getBrokerYtdStats(brokerId, year) {
 }
 
 // ============================================================
-// GITHUB GIST SYNC
+// CLOUD SYNC (JSONBin.io — no GitHub tokens, no revocation)
 // ============================================================
 let _saving = false;
 async function saveToGist() {
   if (_saving) return false;
   _saving = true;
-  // Stamp save time so we can pick the newest copy on load
   state._lastSaved = new Date().toISOString();
-  // Always write localStorage cache first so data survives Gist outages
   saveLocalCache();
   updateGistStatus('saving');
-  // Always prefer the separately-stored credential — it can never be overwritten by Gist data
-  const token  = localStorage.getItem('ct-cloud-token')  || state.settings.gistToken  || GIST_TOKEN;
-  const gistId = localStorage.getItem('ct-cloud-gistid') || state.settings.gistId || GIST_ID;
+  const binId = localStorage.getItem('ct-cloud-gistid') || BIN_ID;
+  const binKey = localStorage.getItem('ct-cloud-token') || BIN_KEY;
+  if (!binId || !binKey) { updateGistStatus('error'); _saving = false; return false; }
   let success = false;
   try {
-    // NEVER write the token into the Gist — GitHub scans Gist content and revokes any token it finds
-    const stateToSave = { ...state, settings: { ...state.settings, gistToken: undefined } };
-    const r = await fetch('https://api.github.com/gists/' + gistId, {
-      method: 'PATCH',
-      headers: { Authorization: 'token ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(stateToSave, null, 2) } } }),
+    const r = await fetch('https://api.jsonbin.io/v3/b/' + binId, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Master-Key': binKey },
+      body: JSON.stringify(state),
     });
     if (r.ok) { updateGistStatus('ok'); success = true; }
-    else { console.warn('Gist save HTTP error:', r.status, 'gistId:', gistId, 'token prefix:', token.slice(0,8)); updateGistStatus('error'); }
-  } catch(e) { console.warn('Gist save failed:', e); updateGistStatus('error'); }
+    else { console.warn('JSONBin save error:', r.status); updateGistStatus('error'); }
+  } catch(e) { console.warn('JSONBin save failed:', e); updateGistStatus('error'); }
   _saving = false;
   return success;
 }
 
 function saveLocalCache() {
   try {
+    // Strip token from cached settings — token lives ONLY in ct-cloud-token, never in state
+    const settingsToCache = { ...state.settings, gistToken: undefined };
     localStorage.setItem('ct-data', JSON.stringify({
       transactions: state.transactions,
       brokers: state.brokers,
-      settings: state.settings
+      settings: settingsToCache
     }));
   } catch(e) { console.warn('localStorage save failed:', e); }
 }
@@ -536,32 +531,25 @@ function updateGistStatus(status) {
 }
 
 async function loadFromGist() {
-  // Always prefer the separately-stored credential — it can never be overwritten by Gist data
-  const token  = localStorage.getItem('ct-cloud-token')  || state.settings.gistToken  || GIST_TOKEN;
-  const gistId = localStorage.getItem('ct-cloud-gistid') || state.settings.gistId || GIST_ID;
+  const binId  = localStorage.getItem('ct-cloud-gistid') || BIN_ID;
+  const binKey = localStorage.getItem('ct-cloud-token')  || BIN_KEY;
+  if (!binId || !binKey) { updateGistStatus('error'); return false; }
   try {
-    const r = await fetch('https://api.github.com/gists/' + gistId, {
-      headers: { Authorization: 'token ' + token },
+    const r = await fetch('https://api.jsonbin.io/v3/b/' + binId + '/latest', {
+      headers: { 'X-Master-Key': binKey },
     });
     if (!r.ok) { updateGistStatus('error'); return false; }
     const data = await r.json();
-    const file = data.files?.[GIST_FILE];
-    if (!file?.content) return false;
-    const loaded = JSON.parse(file.content);
-    const gistTime  = loaded._lastSaved || '1970-01-01';
+    const loaded = data.record;
+    if (!loaded) return false;
+    const cloudTime = loaded._lastSaved || '1970-01-01';
     const localTime = state._lastSaved  || '1970-01-01';
     const localHasData = (state.transactions || []).length > 0;
-    const gistHasData  = (loaded.transactions || []).length > 0;
 
-    if (!localHasData || gistTime >= localTime) {
-      // Gist is same age or newer (or local is empty) — use Gist
+    if (!localHasData || cloudTime >= localTime) {
       const user = state.currentUser;
-      // Preserve locally-stored credentials — never let Gist data overwrite them
-      const savedToken  = localStorage.getItem('ct-cloud-token')  || state.settings.gistToken;
-      const savedGistId = localStorage.getItem('ct-cloud-gistid') || state.settings.gistId;
       state = { ...loaded, currentUser: user, currentPage: state.currentPage, dashYear: loaded.dashYear || state.dashYear };
-      if (savedToken)  state.settings.gistToken = savedToken;
-      if (savedGistId) state.settings.gistId    = savedGistId;
+      state.settings.gistToken = undefined;
       if (!state.settings.tiers) state.settings.tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS.map(t => ({...t, upTo: t.upTo === Infinity ? null : t.upTo}))));
       saveLocalCache();
       updateGistStatus('ok');
@@ -2585,16 +2573,16 @@ function renderSettings(mc) {
   <div class="card" style="margin-bottom:20px">
     <div class="card-header"><div class="card-title">💾 Data & Cloud Sync</div></div>
     <div class="card-body">
-      <p style="font-size:13px;font-weight:600;color:var(--navy);margin:0 0 8px">GitHub Token <span id="sync-dot-settings" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#6b7280;margin-left:4px"></span></p>
-      <p style="font-size:12px;color:var(--muted);margin:0 0 10px">If the sync dot in the nav is red, your token expired. Paste a new one below (github.com → Settings → Developer settings → Personal access tokens → gist scope, No expiration).</p>
+      <p style="font-size:13px;font-weight:600;color:var(--navy);margin:0 0 8px">JSONBin Cloud Sync <span id="sync-dot-settings" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#6b7280;margin-left:4px"></span></p>
+      <p style="font-size:12px;color:var(--muted);margin:0 0 10px">Free cloud sync via JSONBin.io. <strong>One-time setup:</strong> go to jsonbin.io → sign up free → New Bin (enter <code>{}</code>) → copy the Bin ID. Then go to Account → API Keys → copy Master Key. Paste both below.</p>
       <div class="form-row cols-2" style="margin-bottom:10px">
         <div class="form-group" style="margin:0">
-          <label>GitHub Token</label>
-          <input type="password" id="s-gist-token" placeholder="ghp_xxxxxxxxxxxx" value="${esc(s.gistToken||GIST_TOKEN)}">
+          <label>Master Key</label>
+          <input type="password" id="s-gist-token" placeholder="$2a$10$..." value="${esc(localStorage.getItem('ct-cloud-token')||'')}">
         </div>
         <div class="form-group" style="margin:0">
-          <label>Gist ID</label>
-          <input type="text" id="s-gist-id" placeholder="Gist ID" value="${esc(s.gistId||GIST_ID)}">
+          <label>Bin ID</label>
+          <input type="text" id="s-gist-id" placeholder="64abc123..." value="${esc(localStorage.getItem('ct-cloud-gistid')||'')}">
         </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px">
@@ -2657,31 +2645,28 @@ async function mergeBrokers() {
 
 async function saveCloudSettings() {
   const token = document.getElementById('s-gist-token').value.trim();
-  const gistId = document.getElementById('s-gist-id').value.trim();
+  const binId = document.getElementById('s-gist-id').value.trim();
   const result = document.getElementById('cloud-test-result');
-  if (!token || !gistId) { result.textContent = 'Please enter both token and Gist ID.'; result.style.color='var(--red)'; return; }
+  if (!token || !binId) { result.textContent = 'Please enter both Master Key and Bin ID.'; result.style.color='var(--red)'; return; }
   result.textContent = 'Testing…'; result.style.color='var(--muted)';
   try {
-    const r = await fetch(`https://api.github.com/gists/${gistId}`, {
-      headers: { Authorization: 'token ' + token }
+    const r = await fetch(`https://api.jsonbin.io/v3/b/${binId}/latest`, {
+      headers: { 'X-Master-Key': token }
     });
     if (r.ok) {
-      state.settings.gistToken = token;
-      state.settings.gistId = gistId;
-      // Store credentials separately so Gist loads can never overwrite them
       localStorage.setItem('ct-cloud-token',  token);
-      localStorage.setItem('ct-cloud-gistid', gistId);
+      localStorage.setItem('ct-cloud-gistid', binId);
       saveLocalCache();
       const saved = await saveToGist();
       if (saved) {
-        result.textContent = '✓ Connected! Token saved and synced.';
+        result.textContent = '✓ Connected! Synced successfully.';
         result.style.color = 'var(--success)';
       } else {
-        result.textContent = '✗ Token valid for reading but Gist write failed. Make sure your token has "gist" write scope and owns this Gist.';
+        result.textContent = '✗ Read OK but write failed — check your Master Key permissions.';
         result.style.color = 'var(--red)';
       }
     } else {
-      result.textContent = `✗ Failed (${r.status}) — check your token and Gist ID.`;
+      result.textContent = `✗ Failed (${r.status}) — check your Master Key and Bin ID.`;
       result.style.color = 'var(--red)';
     }
   } catch(e) {
@@ -2809,16 +2794,8 @@ function closeAllModals() {
 }
 
 async function syncToGist() {
-  if (!GIST_TOKEN || !GIST_ID) return;
-  const content = JSON.stringify({ transactions:state.transactions, brokers:state.brokers, settings:state.settings });
-  try {
-    await fetch(`https://api.github.com/gists/${GIST_ID}`, {
-      method:'PATCH',
-      headers:{ 'Authorization':'token '+GIST_TOKEN, 'Content-Type':'application/json', 'Accept':'application/vnd.github.v3+json' },
-      body: JSON.stringify({ files: { 'commission-tracker-data.json': { content } } })
-    });
-    updateSyncStatus('Synced');
-  } catch(e) { console.warn('Gist sync failed:', e); updateSyncStatus('Sync failed'); }
+  // Legacy stub — actual sync handled by saveToGist() via JSONBin
+  await saveToGist();
 }
 
 function saveAndSync() {
