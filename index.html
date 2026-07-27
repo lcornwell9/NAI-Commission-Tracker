@@ -396,6 +396,22 @@ function getTxBrokerIds(tx) {
   return tx.team.map(m => m.brokerId).filter(Boolean);
 }
 
+// Returns split for a payment, respecting manualBrokerSplits override if set
+function getEffectiveSplit(pmt, brokerId, gross, ytd, overridePct) {
+  if (pmt.manualBrokerSplits) {
+    const manual = pmt.manualBrokerSplits.find(s => s.brokerId === brokerId);
+    if (manual) {
+      const effectivePct = gross > 0 ? Math.round(manual.brokerNet / gross * 100) : 0;
+      return {
+        brokerAmount: manual.brokerNet,
+        companyAmount: manual.companyNet,
+        effectiveSplit: effectivePct + '%/' + (100 - effectivePct) + '%'
+      };
+    }
+  }
+  return calcSplit(ytd, gross, overridePct);
+}
+
 // Get running YTD gross for a broker UP TO (but not including) a specific payment
 function getBrokerRunningYtd(brokerId, year, beforePaymentId) {
   const allPmts = [];
@@ -473,7 +489,7 @@ function getBrokerYtdStats(brokerId, year) {
   let runYtd = 0;
   for (const { pmt, share } of allPmts) {
     const gross = pmt.amount * share;
-    const split = calcSplit(runYtd, gross, getBrokerOverridePct(brokerId));
+    const split = getEffectiveSplit(pmt, brokerId, gross, runYtd, getBrokerOverridePct(brokerId));
     ytdGross     += gross;
     ytdBrokerNet += split.brokerAmount;
     ytdCompanyNet += split.companyAmount;
@@ -723,7 +739,7 @@ function renderDashboard(mc) {
   const seenTxForValue = new Set();
   for (const { tx, pmt, brokerId, gross } of allRecPmts) {
     if (!brokerRunYtd[brokerId]) brokerRunYtd[brokerId] = 0;
-    const split = calcSplit(brokerRunYtd[brokerId], gross, getBrokerOverridePct(brokerId));
+    const split = getEffectiveSplit(pmt, brokerId, gross, brokerRunYtd[brokerId], getBrokerOverridePct(brokerId));
     ytdGrossRec   += gross;
     ytdBrokerNet  += split.brokerAmount;
     ytdCompanyNet += split.companyAmount;
@@ -1097,28 +1113,46 @@ function buildSubRows(tx, isTeam) {
   const brokerIds = getTxBrokerIds(tx);
   let html = '';
 
-  // Header
+  // Header row with aligned columns
   if (isTeam) {
-    html += `<tr class="sub-row sub-${tx.id} hidden sub-header"><td></td><td colspan="9"><em>Broker · Share · Gross · Broker Net · Company Net · Split · Status · Date</em></td></tr>`;
+    html += `<tr class="sub-row sub-${tx.id} hidden sub-header" style="font-size:11px;color:var(--muted)">
+      <td></td><td>Broker</td><td colspan="2">Share · Gross</td>
+      <td>Broker Net</td><td>Company Net</td><td>Split</td><td>Status</td><td colspan="2">Date</td>
+    </tr>`;
   } else {
-    html += `<tr class="sub-row sub-${tx.id} hidden sub-header"><td></td><td colspan="9"><em>Amount (Gross) · Broker Net · Company Net · Split % · Status · Date</em></td></tr>`;
+    html += `<tr class="sub-row sub-${tx.id} hidden sub-header" style="font-size:11px;color:var(--muted)">
+      <td></td><td colspan="2">Gross Amount</td><td></td>
+      <td>Broker Net</td><td>Company Net</td><td>Split</td><td>Status</td><td colspan="2">Date</td>
+    </tr>`;
   }
 
   for (const pmt of tx.payments) {
     const pmtYear = fiscalYearOf(pmt.receivedDate) || year;
     const isRec = pmt.status === 'received';
+    const isManual = !!pmt.manualBrokerSplits;
 
     if (isTeam) {
+      let firstBrokerRow = true;
       for (const member of tx.team) {
         const broker = state.brokers.find(b=>b.id===member.brokerId);
         const share = member.pct / 100;
         const gross = pmt.amount * share;
         const ytd = isRec ? getBrokerRunningYtd(member.brokerId, pmtYear, pmt.id) : 0;
-        const split = calcSplit(ytd, gross, getBrokerOverridePct(member.brokerId));
+        const split = getEffectiveSplit(pmt, member.brokerId, gross, ytd, getBrokerOverridePct(member.brokerId));
         const bn = isRec ? split.brokerAmount : null;
         const cn = isRec ? split.companyAmount : null;
+        // Edit button on first broker row of a received payment; delete on pending
+        let actionBtn = '';
+        if (firstBrokerRow) {
+          if (isRec) {
+            actionBtn = `<button class="btn-icon" title="${isManual?'Edit manual split (active)':'Edit split amounts'}" onclick="openEditPaymentSplitModal('${tx.id}','${pmt.id}')" style="font-size:11px;padding:1px 4px;${isManual?'color:var(--warning)':''}">✏️</button>`;
+          } else {
+            actionBtn = `<button class="btn-icon" title="Delete payment" onclick="deletePayment('${tx.id}','${pmt.id}')" style="font-size:11px;padding:1px 4px;color:var(--danger)">🗑️</button>`;
+          }
+          firstBrokerRow = false;
+        }
         html += `<tr class="sub-row sub-${tx.id} hidden">
-          <td></td>
+          <td>${actionBtn}</td>
           <td><strong>${esc(broker?.name||'?')}</strong></td>
           <td colspan="2">${member.pct}% · ${fmtD(gross)}</td>
           <td class="td-mono" style="color:${isRec?'var(--success)':'var(--muted)'}">${isRec?fmtD(bn):`<em style="color:var(--muted)">~${fmtD(split.brokerAmount)}</em>`}</td>
@@ -1131,16 +1165,23 @@ function buildSubRows(tx, isTeam) {
     } else {
       const bid = tx.brokerId || (brokerIds[0]||'');
       const ytd = isRec ? getBrokerRunningYtd(bid, pmtYear, pmt.id) : 0;
-      const split = calcSplit(ytd, pmt.amount, getBrokerOverridePct(bid));
+      const split = getEffectiveSplit(pmt, bid, pmt.amount, ytd, getBrokerOverridePct(bid));
       const bn = isRec ? split.brokerAmount : null;
+      let actionBtn = '';
+      if (isRec) {
+        actionBtn = `<button class="btn-icon" title="${isManual?'Edit manual split (active)':'Edit split amounts'}" onclick="openEditPaymentSplitModal('${tx.id}','${pmt.id}')" style="font-size:11px;padding:1px 4px;${isManual?'color:var(--warning)':''}">✏️</button>`;
+      } else {
+        actionBtn = `<button class="btn-icon" title="Delete payment" onclick="deletePayment('${tx.id}','${pmt.id}')" style="font-size:11px;padding:1px 4px;color:var(--danger)">🗑️</button>`;
+      }
       html += `<tr class="sub-row sub-${tx.id} hidden">
-        <td></td>
+        <td>${actionBtn}</td>
         <td colspan="2">${fmtD(pmt.amount)}</td>
+        <td></td>
         <td class="td-mono" style="color:${isRec?'var(--success)':'var(--muted)'}">${isRec?fmtD(bn):`<em style="color:var(--muted)">~${fmtD(split.brokerAmount)}</em>`}</td>
         <td class="td-mono">${isRec?fmtD(split.companyAmount):'—'}</td>
         <td><span class="tag">${isRec?split.effectiveSplit:'~'+split.effectiveSplit}</span></td>
         <td><span class="badge ${isRec?'badge-complete':'badge-pending'}">${isRec?'Received':'Pending'}</span></td>
-        <td colspan="3">${isRec?fmtDate(pmt.receivedDate):'—'}</td>
+        <td colspan="2">${isRec?fmtDate(pmt.receivedDate):'—'}</td>
       </tr>`;
     }
   }
@@ -1235,6 +1276,106 @@ async function saveMarkReceived(txId) {
   pmt.brokerNet=brokerNet; pmt.companyNet=companyNet; pmt.effectiveSplit=effectiveSplit;
   tx.lastEditedBy=state.currentUser; tx.lastEditedAt=new Date().toISOString();
   closeModal();
+  await saveToGist();
+  renderPage();
+}
+
+// ── EDIT PAYMENT SPLIT MODAL (manual override)
+function openEditPaymentSplitModal(txId, pmtId) {
+  const tx = state.transactions.find(t=>t.id===txId);
+  if (!tx) return;
+  const pmt = tx.payments.find(p=>p.id===pmtId);
+  if (!pmt) return;
+  const isTeam = tx.team && tx.team.length > 0;
+  const brokerIds = getTxBrokerIds(tx);
+  const pmtYear = fiscalYearOf(pmt.receivedDate) || state.settings.fiscalYear || new Date().getFullYear();
+
+  let fieldsHtml = '';
+  for (const bid of brokerIds) {
+    const broker = state.brokers.find(b=>b.id===bid);
+    let share = 1;
+    if (isTeam) { const m=tx.team.find(mm=>mm.brokerId===bid); share=m?m.pct/100:0; }
+    const gross = pmt.amount * share;
+    const ytd = getBrokerRunningYtd(bid, pmtYear, pmt.id);
+    const autosplit = calcSplit(ytd, gross, getBrokerOverridePct(bid));
+    const manual = pmt.manualBrokerSplits?.find(s=>s.brokerId===bid);
+    const curBn = manual ? manual.brokerNet : autosplit.brokerAmount;
+    const curCn = manual ? manual.companyNet : autosplit.companyAmount;
+    fieldsHtml += `
+      <div style="margin-bottom:12px;padding:10px;background:#f8fafc;border-radius:var(--radius)">
+        <div style="font-weight:600;margin-bottom:6px">${esc(broker?.name||'?')}${isTeam?` — ${Math.round(share*100)}% share · Gross ${fmtD(gross)}`:'· Gross '+fmtD(gross)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Auto-calc: Broker ${fmtD(autosplit.brokerAmount)} · Company ${fmtD(autosplit.companyAmount)} · ${autosplit.effectiveSplit}</div>
+        <div class="form-row cols-2">
+          <div class="form-group"><label>Broker Net</label><input type="number" id="eps-bn-${bid}" step="0.01" value="${curBn.toFixed(2)}"></div>
+          <div class="form-group"><label>Company Net</label><input type="number" id="eps-cn-${bid}" step="0.01" value="${curCn.toFixed(2)}"></div>
+        </div>
+      </div>`;
+  }
+
+  const hasManual = !!pmt.manualBrokerSplits;
+  openModal('Edit Payment Split', `
+    <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Override the broker/company net amounts for this payment. Leave as auto-calc or enter custom values.</p>
+    ${fieldsHtml}
+    <div class="modal-footer" style="justify-content:space-between">
+      <div>
+        ${hasManual ? `<button class="btn btn-ghost" style="color:var(--danger)" onclick="clearManualSplit('${txId}','${pmtId}')">Clear Override</button>` : ''}
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveEditPaymentSplit('${txId}','${pmtId}')">Save Override</button>
+      </div>
+    </div>`);
+}
+
+async function saveEditPaymentSplit(txId, pmtId) {
+  const tx = state.transactions.find(t=>t.id===txId);
+  if (!tx) return;
+  const pmt = tx.payments.find(p=>p.id===pmtId);
+  if (!pmt) return;
+  const brokerIds = getTxBrokerIds(tx);
+  const manualSplits = [];
+  for (const bid of brokerIds) {
+    const bnInput = document.getElementById('eps-bn-' + bid);
+    const cnInput = document.getElementById('eps-cn-' + bid);
+    if (!bnInput || !cnInput) continue;
+    const bn = parseFloat(bnInput.value);
+    const cn = parseFloat(cnInput.value);
+    if (isNaN(bn) || isNaN(cn)) { alert('Please enter valid numbers for all fields.'); return; }
+    manualSplits.push({ brokerId: bid, brokerNet: Math.round(bn*100)/100, companyNet: Math.round(cn*100)/100 });
+  }
+  pmt.manualBrokerSplits = manualSplits;
+  tx.lastEditedBy = state.currentUser;
+  tx.lastEditedAt = new Date().toISOString();
+  closeModal();
+  await saveToGist();
+  renderPage();
+}
+
+async function clearManualSplit(txId, pmtId) {
+  const tx = state.transactions.find(t=>t.id===txId);
+  const pmt = tx?.payments.find(p=>p.id===pmtId);
+  if (!pmt) return;
+  delete pmt.manualBrokerSplits;
+  tx.lastEditedBy = state.currentUser;
+  tx.lastEditedAt = new Date().toISOString();
+  closeModal();
+  await saveToGist();
+  renderPage();
+}
+
+async function deletePayment(txId, pmtId) {
+  const tx = state.transactions.find(t=>t.id===txId);
+  if (!tx) return;
+  const pmt = tx.payments.find(p=>p.id===pmtId);
+  if (!pmt) return;
+  if (pmt.status === 'received') {
+    if (!confirm('This payment is already marked received. Are you sure you want to delete it?')) return;
+  } else {
+    if (!confirm('Delete this pending payment?')) return;
+  }
+  tx.payments = tx.payments.filter(p=>p.id!==pmtId);
+  tx.lastEditedBy = state.currentUser;
+  tx.lastEditedAt = new Date().toISOString();
   await saveToGist();
   renderPage();
 }
