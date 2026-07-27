@@ -218,8 +218,8 @@ const LOGO_BLACK_LOGIN = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABmIAAAIa
 // ============================================================
 // CONSTANTS
 // ============================================================
-const BIN_ID  = '';  // JSONBin Bin ID — set in Settings
-const BIN_KEY = '';  // JSONBin Master Key — set in Settings
+const FB_URL    = '';  // Firebase Realtime Database URL — set in Settings
+const FB_SECRET = '';  // Firebase Database Secret — set in Settings
 
 const DEFAULT_TIERS = [
   { upTo: 140000,   brokerPct: 0.60, companyPct: 0.40 },
@@ -483,7 +483,7 @@ function getBrokerYtdStats(brokerId, year) {
 }
 
 // ============================================================
-// CLOUD SYNC (JSONBin.io — no GitHub tokens, no revocation)
+// CLOUD SYNC (Firebase Realtime Database)
 // ============================================================
 let _saving = false;
 async function saveToGist() {
@@ -492,24 +492,23 @@ async function saveToGist() {
   state._lastSaved = new Date().toISOString();
   saveLocalCache();
   updateGistStatus('saving');
-  const binId = localStorage.getItem('ct-cloud-gistid') || BIN_ID;
-  const binKey = localStorage.getItem('ct-cloud-token') || BIN_KEY;
-  if (!binId || !binKey) { updateGistStatus('error'); _saving = false; return false; }
+  const fbUrl    = localStorage.getItem('ct-cloud-gistid') || FB_URL;
+  const fbSecret = localStorage.getItem('ct-cloud-token')  || FB_SECRET;
+  if (!fbUrl || !fbSecret) { updateGistStatus('error'); _saving = false; return false; }
   let success = false;
   try {
-    const r = await fetch('https://api.jsonbin.io/v3/b/' + binId, {
+    const r = await fetch(fbUrl + '/tracker.json?auth=' + fbSecret, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'X-Master-Key': binKey },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(state),
     });
     if (r.ok) { updateGistStatus('ok'); success = true; }
     else {
       const errBody = await r.text().catch(()=>'');
-      const payloadSize = Math.round(JSON.stringify(state).length / 1024);
-      console.warn('JSONBin save error — status:', r.status, '| response:', errBody, '| payload size:', payloadSize + 'KB');
+      console.warn('Firebase save error — status:', r.status, '| response:', errBody);
       updateGistStatus('error');
     }
-  } catch(e) { console.warn('JSONBin save failed:', e); updateGistStatus('error'); }
+  } catch(e) { console.warn('Firebase save failed:', e); updateGistStatus('error'); }
   _saving = false;
   return success;
 }
@@ -536,16 +535,13 @@ function updateGistStatus(status) {
 }
 
 async function loadFromGist() {
-  const binId  = localStorage.getItem('ct-cloud-gistid') || BIN_ID;
-  const binKey = localStorage.getItem('ct-cloud-token')  || BIN_KEY;
-  if (!binId || !binKey) { updateGistStatus('error'); return false; }
+  const fbUrl    = localStorage.getItem('ct-cloud-gistid') || FB_URL;
+  const fbSecret = localStorage.getItem('ct-cloud-token')  || FB_SECRET;
+  if (!fbUrl || !fbSecret) { updateGistStatus('error'); return false; }
   try {
-    const r = await fetch('https://api.jsonbin.io/v3/b/' + binId + '/latest', {
-      headers: { 'X-Master-Key': binKey },
-    });
+    const r = await fetch(fbUrl + '/tracker.json?auth=' + fbSecret);
     if (!r.ok) { updateGistStatus('error'); return false; }
-    const data = await r.json();
-    const loaded = data.record;
+    const loaded = await r.json();
     if (!loaded) return false;
     const cloudTime = loaded._lastSaved || '1970-01-01';
     const localTime = state._lastSaved  || '1970-01-01';
@@ -2589,16 +2585,16 @@ function renderSettings(mc) {
   <div class="card" style="margin-bottom:20px">
     <div class="card-header"><div class="card-title">💾 Data & Cloud Sync</div></div>
     <div class="card-body">
-      <p style="font-size:13px;font-weight:600;color:var(--navy);margin:0 0 8px">JSONBin Cloud Sync <span id="sync-dot-settings" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#6b7280;margin-left:4px"></span></p>
-      <p style="font-size:12px;color:var(--muted);margin:0 0 10px">Free cloud sync via JSONBin.io. <strong>One-time setup:</strong> go to jsonbin.io → sign up free → New Bin (enter <code>{}</code>) → copy the Bin ID. Then go to Account → API Keys → copy Master Key. Paste both below.</p>
+      <p style="font-size:13px;font-weight:600;color:var(--navy);margin:0 0 8px">Firebase Cloud Sync <span id="sync-dot-settings" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#6b7280;margin-left:4px"></span></p>
+      <p style="font-size:12px;color:var(--muted);margin:0 0 10px">Free cloud sync via Firebase. <strong>One-time setup:</strong> go to console.firebase.google.com → Add project → Build → Realtime Database → Create Database → copy the Database URL. Then Project Settings → Service Accounts → Database secrets → copy the secret. Paste both below.</p>
       <div class="form-row cols-2" style="margin-bottom:10px">
         <div class="form-group" style="margin:0">
-          <label>Master Key</label>
-          <input type="password" id="s-gist-token" placeholder="$2a$10$..." value="${esc(localStorage.getItem('ct-cloud-token')||'')}">
+          <label>Database Secret</label>
+          <input type="password" id="s-gist-token" placeholder="your-firebase-secret" value="${esc(localStorage.getItem('ct-cloud-token')||'')}">
         </div>
         <div class="form-group" style="margin:0">
-          <label>Bin ID</label>
-          <input type="text" id="s-gist-id" placeholder="64abc123..." value="${esc(localStorage.getItem('ct-cloud-gistid')||'')}">
+          <label>Database URL</label>
+          <input type="text" id="s-gist-id" placeholder="https://your-project-default-rtdb.firebaseio.com" value="${esc(localStorage.getItem('ct-cloud-gistid')||'')}">
         </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px">
@@ -2660,29 +2656,27 @@ async function mergeBrokers() {
 }
 
 async function saveCloudSettings() {
-  const token = document.getElementById('s-gist-token').value.trim();
-  const binId = document.getElementById('s-gist-id').value.trim();
+  const secret = document.getElementById('s-gist-token').value.trim();
+  const fbUrl  = document.getElementById('s-gist-id').value.trim();
   const result = document.getElementById('cloud-test-result');
-  if (!token || !binId) { result.textContent = 'Please enter both Master Key and Bin ID.'; result.style.color='var(--red)'; return; }
+  if (!secret || !fbUrl) { result.textContent = 'Please enter both Database Secret and Database URL.'; result.style.color='var(--red)'; return; }
   result.textContent = 'Testing…'; result.style.color='var(--muted)';
   try {
-    const r = await fetch(`https://api.jsonbin.io/v3/b/${binId}/latest`, {
-      headers: { 'X-Master-Key': token }
-    });
+    const r = await fetch(fbUrl + '/tracker.json?auth=' + secret);
     if (r.ok) {
-      localStorage.setItem('ct-cloud-token',  token);
-      localStorage.setItem('ct-cloud-gistid', binId);
+      localStorage.setItem('ct-cloud-token',  secret);
+      localStorage.setItem('ct-cloud-gistid', fbUrl);
       saveLocalCache();
       const saved = await saveToGist();
       if (saved) {
         result.textContent = '✓ Connected! Synced successfully.';
         result.style.color = 'var(--success)';
       } else {
-        result.textContent = '✗ Read OK but write failed — check your Master Key and Bin ID.';
+        result.textContent = '✗ Read OK but write failed — check your Database Secret and rules.';
         result.style.color = 'var(--red)';
       }
     } else {
-      result.textContent = `✗ Failed (${r.status}) — check your Master Key and Bin ID.`;
+      result.textContent = `✗ Failed (${r.status}) — check your Database URL and Secret.`;
       result.style.color = 'var(--red)';
     }
   } catch(e) {
