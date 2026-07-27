@@ -503,7 +503,12 @@ async function saveToGist() {
       body: JSON.stringify(state),
     });
     if (r.ok) { updateGistStatus('ok'); success = true; }
-    else { console.warn('JSONBin save error:', r.status); updateGistStatus('error'); }
+    else {
+      const errBody = await r.text().catch(()=>'');
+      const payloadSize = Math.round(JSON.stringify(state).length / 1024);
+      console.warn('JSONBin save error — status:', r.status, '| response:', errBody, '| payload size:', payloadSize + 'KB');
+      updateGistStatus('error');
+    }
   } catch(e) { console.warn('JSONBin save failed:', e); updateGistStatus('error'); }
   _saving = false;
   return success;
