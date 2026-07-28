@@ -512,11 +512,14 @@ async function saveToGist() {
   const fbSecret = localStorage.getItem('ct-cloud-token')  || FB_SECRET;
   if (!fbUrl || !fbSecret) { updateGistStatus('error'); _saving = false; return false; }
   let success = false;
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 12000);
   try {
     const r = await fetch(fbUrl + '/tracker.json?auth=' + fbSecret, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(state),
+      signal: ctrl.signal,
     });
     if (r.ok) { updateGistStatus('ok'); success = true; }
     else {
@@ -524,7 +527,17 @@ async function saveToGist() {
       console.warn('Firebase save error — status:', r.status, '| response:', errBody);
       updateGistStatus('error');
     }
-  } catch(e) { console.warn('Firebase save failed:', e); updateGistStatus('error'); }
+  } catch(e) {
+    if (e.name === 'AbortError') {
+      console.warn('Firebase save timed out after 12s');
+      updateGistStatus('error');
+      alert('Save timed out — check your internet connection and try again.');
+    } else {
+      console.warn('Firebase save failed:', e);
+      updateGistStatus('error');
+    }
+  }
+  clearTimeout(timeout);
   _saving = false;
   return success;
 }
@@ -1502,6 +1515,18 @@ async function saveEditTx(txId) {
   tx.contractDate = document.getElementById('tf-contract').value;
   tx.closingDate  = document.getElementById('tf-closing').value;
   tx.notes = document.getElementById('tf-notes').value;
+  // Update pending payment amount
+  const pendAmt = parseFloat(document.getElementById('tf-pending')?.value) || 0;
+  const existingPending = tx.payments ? tx.payments.filter(p => p.status === 'pending') : [];
+  if (existingPending.length === 1) {
+    // Update the single pending payment
+    existingPending[0].amount = pendAmt;
+  } else if (existingPending.length === 0 && pendAmt > 0) {
+    // Add a new pending payment
+    if (!tx.payments) tx.payments = [];
+    tx.payments.push({ id: makeId(), status: 'pending', amount: pendAmt });
+  }
+  // If multiple pending payments, leave them alone (can delete individually)
   tx.lastEditedBy = state.currentUser; tx.lastEditedAt = new Date().toISOString();
   closeModal();
   await saveToGist();
