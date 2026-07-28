@@ -728,7 +728,10 @@ function renderDashboard(mc) {
   for (const tx of state.transactions) {
     const brokerIds = getTxBrokerIds(tx);
     for (const pmt of tx.payments) {
-      if (pmt.status === 'pending') totalPendingAR += pmt.amount;
+      if (pmt.status === 'pending') {
+        const txYear = tx.fiscalYear || fiscalYearOf(tx.closingDate) || fiscalYearOf(tx.createdAt);
+        if (txYear === year) totalPendingAR += pmt.amount;
+      }
       if (pmt.status === 'received' && fiscalYearOf(pmt.receivedDate) === year) {
         for (const bid of brokerIds) {
           let share = 1;
@@ -915,7 +918,7 @@ function renderDashboard(mc) {
 
   // ── MONTHLY TABLE
   const activeBrokers = state.brokers.filter(b => b.active || Object.values(brokerMonthly).some((_,bid)=>bid===b.id));
-  const brokersWithData = state.brokers.filter(b => brokerMonthly[b.id]);
+  const brokersWithData = state.brokers.filter(b => brokerMonthly[b.id]).sort((a,b) => a.name.localeCompare(b.name));
   let thHtml = '<thead><tr><th>Broker</th>';
   for (let m=0; m<12; m++) thHtml += `<th class="${m===curMonth?'cur-month-hdr':''}">${MONTHS_SHORT[m]}${m===curMonth?' ★':''}</th>`;
   thHtml += '<th>YTD Total</th></tr></thead>';
@@ -2015,7 +2018,7 @@ async function confirmImport() { if (window._pendingImportConfirm) await window.
 // ============================================================
 function renderBrokers(mc) {
   const year = state.settings.fiscalYear || new Date().getFullYear();
-  const rows = state.brokers.map(b => {
+  const rows = [...state.brokers].sort((a,b) => a.name.localeCompare(b.name)).map(b => {
     const stats = getBrokerYtdStats(b.id, year);
     const tierLabel = getCurrentTierLabel(stats.ytdGross);
     const txCount = state.transactions.filter(tx => getTxBrokerIds(tx).includes(b.id)).length;
