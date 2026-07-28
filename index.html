@@ -1331,7 +1331,11 @@ function openEditPaymentSplitModal(txId, pmtId) {
 
   const hasManual = !!pmt.manualBrokerSplits;
   openModal('Edit Payment Split', `
-    <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Override the broker/company net amounts for this payment. Leave as auto-calc or enter custom values.</p>
+    <div class="form-row cols-2" style="margin-bottom:16px">
+      <div class="form-group"><label>Amount Received</label><input type="number" id="eps-amount" step="0.01" value="${pmt.amount}"></div>
+      <div class="form-group"><label>Date Received</label><input type="date" id="eps-date" value="${pmt.receivedDate||''}"></div>
+    </div>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Optionally override the broker/company net amounts below.</p>
     ${fieldsHtml}
     <div class="modal-footer" style="justify-content:space-between">
       <div>
@@ -1349,6 +1353,12 @@ async function saveEditPaymentSplit(txId, pmtId) {
   if (!tx) return;
   const pmt = tx.payments.find(p=>p.id===pmtId);
   if (!pmt) return;
+  // Update amount and date
+  const newAmount = parseFloat(document.getElementById('eps-amount')?.value);
+  const newDate   = document.getElementById('eps-date')?.value;
+  if (!isNaN(newAmount) && newAmount > 0) pmt.amount = newAmount;
+  if (newDate) pmt.receivedDate = newDate;
+  // Update manual splits if provided
   const brokerIds = getTxBrokerIds(tx);
   const manualSplits = [];
   for (const bid of brokerIds) {
