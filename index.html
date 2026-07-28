@@ -503,10 +503,14 @@ function getBrokerYtdStats(brokerId, year) {
 // ============================================================
 let _saving = false;
 async function saveToGist() {
-  if (_saving) return false;
-  _saving = true;
+  // Always persist locally immediately, regardless of cloud save state
   state._lastSaved = new Date().toISOString();
   saveLocalCache();
+  if (_saving) {
+    console.warn('saveToGist: cloud save already in progress, local cache updated');
+    return false;
+  }
+  _saving = true;
   updateGistStatus('saving');
   const fbUrl    = localStorage.getItem('ct-cloud-gistid') || FB_URL;
   const fbSecret = localStorage.getItem('ct-cloud-token')  || FB_SECRET;
@@ -1417,6 +1421,7 @@ function openEditTxModal(txId) {
   const brokerOpts = state.brokers.map(b=>`<option value="${b.id}" ${b.id===tx.brokerId?'selected':''}>${esc(b.name)}</option>`).join('');
   openModal('Edit Transaction', `
     ${txFormHtml(brokerOpts, tx)}
+    <div id="edit-tx-error" style="color:var(--danger);font-size:12px;margin-top:8px"></div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveEditTx('${txId}')">Save Changes</button>
@@ -1528,8 +1533,17 @@ async function saveEditTx(txId) {
   }
   // If multiple pending payments, leave them alone (can delete individually)
   tx.lastEditedBy = state.currentUser; tx.lastEditedAt = new Date().toISOString();
+  // Show saving state on button, keep modal open until done
+  const saveBtn = document.querySelector('#modal-body .btn-primary');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+  const ok = await saveToGist();
+  if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Changes'; }
+  if (!ok) {
+    // Local cache was already updated — warn but don't block
+    const errEl = document.getElementById('edit-tx-error');
+    if (errEl) errEl.textContent = 'Cloud sync failed — changes saved locally only.';
+  }
   closeModal();
-  await saveToGist();
   renderPage();
 }
 
