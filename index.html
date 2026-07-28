@@ -218,8 +218,8 @@ const LOGO_BLACK_LOGIN = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABmIAAAIa
 // ============================================================
 // CONSTANTS
 // ============================================================
-const FB_URL    = '';  // Firebase Realtime Database URL — set in Settings
-const FB_SECRET = '';  // Firebase Database Secret — set in Settings
+const FB_URL    = 'https://nai-red-commissions-default-rtdb.firebaseio.com';
+const FB_SECRET = 'd3VVa7F926lGHYGTvTwQs6fGZF3H9tWmdVclPvRZ';
 
 const DEFAULT_TIERS = [
   { upTo: 140000,   brokerPct: 0.60, companyPct: 0.40 },
@@ -728,10 +728,7 @@ function renderDashboard(mc) {
   for (const tx of state.transactions) {
     const brokerIds = getTxBrokerIds(tx);
     for (const pmt of tx.payments) {
-      if (pmt.status === 'pending') {
-        const txYear = tx.fiscalYear || fiscalYearOf(tx.closingDate) || fiscalYearOf(tx.createdAt);
-        if (txYear === year) totalPendingAR += pmt.amount;
-      }
+      if (pmt.status === 'pending') totalPendingAR += pmt.amount;
       if (pmt.status === 'received' && fiscalYearOf(pmt.receivedDate) === year) {
         for (const bid of brokerIds) {
           let share = 1;
