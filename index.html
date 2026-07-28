@@ -1338,12 +1338,13 @@ function openEditPaymentSplitModal(txId, pmtId) {
     <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Optionally override the broker/company net amounts below.</p>
     ${fieldsHtml}
     <div class="modal-footer" style="justify-content:space-between">
-      <div>
-        ${hasManual ? `<button class="btn btn-ghost" style="color:var(--danger)" onclick="clearManualSplit('${txId}','${pmtId}')">Clear Override</button>` : ''}
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" style="color:var(--danger)" onclick="deletePayment('${txId}','${pmtId}')">Delete Payment</button>
+        ${hasManual ? `<button class="btn btn-ghost" style="color:var(--muted)" onclick="clearManualSplit('${txId}','${pmtId}')">Clear Override</button>` : ''}
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="saveEditPaymentSplit('${txId}','${pmtId}')">Save Override</button>
+        <button class="btn btn-primary" onclick="saveEditPaymentSplit('${txId}','${pmtId}')">Save</button>
       </div>
     </div>`);
 }
