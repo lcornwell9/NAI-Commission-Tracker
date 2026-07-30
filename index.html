@@ -1443,7 +1443,20 @@ function txFormHtml(brokerOpts, tx) {
   return `
   <div class="form-row cols-2">
     <div class="form-group"><label>Property Address</label><input id="tf-address" type="text" value="${esc(tx?.propertyAddress||'')}"></div>
-    <div class="form-group"><label>Broker</label><select id="tf-broker">${brokerOpts}</select></div>
+    <div class="form-group"><label>Primary Broker</label><select id="tf-broker">${brokerOpts}</select></div>
+  </div>
+  <div class="form-group" style="margin-bottom:4px">
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+      <input type="checkbox" id="tf-is-team" onchange="toggleTeamSection()" ${tx?.team?.length>0?'checked':''}>
+      Team Deal (multiple brokers)
+    </label>
+  </div>
+  <div id="tf-team-section" style="${tx?.team?.length>0?'':'display:none'}margin-bottom:12px;padding:10px;background:#f8fafc;border-radius:var(--radius)">
+    <div style="font-size:12px;font-weight:600;color:var(--text-sm);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px">Team Split</div>
+    <div id="tf-team-rows">
+      ${tx?.team?.length>0 ? tx.team.map(m=>{const b=state.brokers.find(b=>b.id===m.brokerId);return `<div class="team-row" style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><select class="tf-tm-broker" style="flex:1;padding:6px 8px;border:1.5px solid var(--border);border-radius:var(--radius);font-size:13px">${state.brokers.map(bb=>`<option value="${bb.id}" ${bb.id===m.brokerId?'selected':''}>${esc(bb.name)}</option>`).join('')}</select><input type="number" class="tf-tm-pct" value="${m.pct}" placeholder="%" style="width:70px;padding:6px 8px;border:1.5px solid var(--border);border-radius:var(--radius);font-size:13px"><button class="btn btn-ghost" style="padding:4px 8px;font-size:12px" onclick="this.closest('.team-row').remove()">✕</button></div>`;}).join('') : ''}
+    </div>
+    <button class="btn btn-ghost btn-sm" onclick="addTeamRow()" style="font-size:12px;margin-top:4px">+ Add Broker</button>
   </div>
   <div class="form-row cols-2">
     <div class="form-group"><label>Client (Buyer/Seller/Tenant)</label><input id="tf-client" type="text" value="${esc(tx?.clientName||'')}"></div>
@@ -1484,10 +1497,39 @@ function txFormHtml(brokerOpts, tx) {
   <div class="form-group"><label>Pending Payment Amount</label><input id="tf-pending" type="number" step="0.01" value="${!tx?'':tx.payments.find(p=>p.status==='pending')?.amount||''}"></div>`;
 }
 
+function toggleTeamSection() {
+  const show = document.getElementById('tf-is-team')?.checked;
+  const sec = document.getElementById('tf-team-section');
+  if (!sec) return;
+  sec.style.display = show ? '' : 'none';
+  if (show && document.querySelectorAll('#tf-team-rows .team-row').length === 0) addTeamRow();
+}
+
+function addTeamRow(brokerId='', pct='') {
+  const brokerOpts = state.brokers.map(b=>`<option value="${b.id}" ${b.id===brokerId?'selected':''}>${esc(b.name)}</option>`).join('');
+  const div = document.createElement('div');
+  div.className = 'team-row';
+  div.style = 'display:flex;gap:8px;align-items:center;margin-bottom:6px';
+  div.innerHTML = `<select class="tf-tm-broker" style="flex:1;padding:6px 8px;border:1.5px solid var(--border);border-radius:var(--radius);font-size:13px">${brokerOpts}</select><input type="number" class="tf-tm-pct" value="${pct}" placeholder="%" style="width:70px;padding:6px 8px;border:1.5px solid var(--border);border-radius:var(--radius);font-size:13px"><button class="btn btn-ghost" style="padding:4px 8px;font-size:12px" onclick="this.closest('.team-row').remove()">✕</button>`;
+  document.getElementById('tf-team-rows').appendChild(div);
+}
+
+function readTeamFromForm() {
+  const team = [];
+  document.querySelectorAll('#tf-team-rows .team-row').forEach(row => {
+    const brokerId = row.querySelector('.tf-tm-broker')?.value;
+    const pct = parseFloat(row.querySelector('.tf-tm-pct')?.value) || 0;
+    if (brokerId && pct > 0) team.push({ brokerId, pct });
+  });
+  return team;
+}
+
 async function saveNewTx() {
   const brokerId = document.getElementById('tf-broker').value;
   const address  = document.getElementById('tf-address').value.trim();
   if (!address) { alert('Property address is required.'); return; }
+  const isTeam = document.getElementById('tf-is-team')?.checked;
+  const team = isTeam ? readTeamFromForm() : [];
   const pendAmt  = parseFloat(document.getElementById('tf-pending').value)||0;
   const payments = pendAmt > 0 ? [{id:makeId(),status:'pending',amount:pendAmt}] : [];
   const tx = {
@@ -1504,7 +1546,7 @@ async function saveNewTx() {
     contractDate: document.getElementById('tf-contract').value,
     closingDate: document.getElementById('tf-closing').value,
     notes: document.getElementById('tf-notes').value,
-    team: [], payments,
+    team, payments,
     importedPendingAR: false,
     createdAt: new Date().toISOString(),
     lastEditedBy: state.currentUser, lastEditedAt: new Date().toISOString(),
@@ -1782,9 +1824,26 @@ function fillTxFormFromPdf(parsed) {
   if (parsed.totalCommission) { const el=document.getElementById('tf-comm'); if(el) el.value=parsed.totalCommission; if(!document.getElementById('tf-pending').value) document.getElementById('tf-pending').value=parsed.totalCommission; }
   if (parsed.sqFtg) { const el=document.getElementById('tf-sqft'); if(el) el.value=parsed.sqFtg; }
 
-  // Try to match broker from team
+  // Populate team section from PDF
   if (parsed.team && parsed.team.length > 0) {
-    for (const member of parsed.team) {
+    const isTeamChk = document.getElementById('tf-is-team');
+    const teamSec = document.getElementById('tf-team-section');
+    const teamRows = document.getElementById('tf-team-rows');
+    if (isTeamChk && teamSec && teamRows) {
+      isTeamChk.checked = true;
+      teamSec.style.display = '';
+      teamRows.innerHTML = '';
+      for (const member of parsed.team) {
+        const broker = resolveBrokerName(member.name);
+        addTeamRow(broker?.id || '', member.pct);
+      }
+    }
+    // Set primary broker to first matched team member
+    const first = resolveBrokerName(parsed.team[0]?.name);
+    if (first) { const el=document.getElementById('tf-broker'); if(el) el.value=first.id; }
+  } else {
+    // Single broker — try to match from PDF if broker name present
+    for (const member of (parsed.team||[])) {
       const broker = resolveBrokerName(member.name);
       if (broker) { const el=document.getElementById('tf-broker'); if(el) el.value=broker.id; break; }
     }
