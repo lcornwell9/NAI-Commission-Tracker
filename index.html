@@ -1510,8 +1510,10 @@ async function saveNewTx() {
     lastEditedBy: state.currentUser, lastEditedAt: new Date().toISOString(),
   };
   state.transactions.push(tx);
-  closeModal();
+  const saveBtn = document.querySelector('#modal-body .btn-primary');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
   await saveToGist();
+  closeModal();
   renderPage();
 }
 
