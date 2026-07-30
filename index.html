@@ -1154,7 +1154,7 @@ function buildSubRows(tx, isTeam) {
         const broker = state.brokers.find(b=>b.id===member.brokerId);
         const share = member.pct / 100;
         const gross = pmt.amount * share;
-        const ytd = isRec ? getBrokerRunningYtd(member.brokerId, pmtYear, pmt.id) : 0;
+        const ytd = getBrokerRunningYtd(member.brokerId, pmtYear, isRec ? pmt.id : null);
         const split = getEffectiveSplit(pmt, member.brokerId, gross, ytd, getBrokerOverridePct(member.brokerId));
         const bn = isRec ? split.brokerAmount : null;
         const cn = isRec ? split.companyAmount : null;
@@ -1181,7 +1181,7 @@ function buildSubRows(tx, isTeam) {
       }
     } else {
       const bid = tx.brokerId || (brokerIds[0]||'');
-      const ytd = isRec ? getBrokerRunningYtd(bid, pmtYear, pmt.id) : 0;
+      const ytd = getBrokerRunningYtd(bid, pmtYear, isRec ? pmt.id : null);
       const split = getEffectiveSplit(pmt, bid, pmt.amount, ytd, getBrokerOverridePct(bid));
       const bn = isRec ? split.brokerAmount : null;
       let actionBtn = '';
