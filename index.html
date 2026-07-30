@@ -1586,21 +1586,39 @@ async function handlePdfFile(file) {
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({data: buf}).promise;
     let fullText = '';
-    const fields = {};
     for (let i=1; i<=pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const content = await page.getTextContent();
       fullText += content.items.map(it=>it.str).join(' ') + '\n';
-      // Read form field values from annotations
-      const anns = await page.getAnnotations();
-      for (const ann of anns) {
-        if (ann.fieldName && ann.fieldValue !== undefined && ann.fieldValue !== null) {
-          fields[ann.fieldName] = ann.fieldValue;
+    }
+
+    // Try getFieldObjects() — most reliable way to read AcroForm values in PDF.js
+    let fields = {};
+    try {
+      const fieldObjects = await pdf.getFieldObjects();
+      if (fieldObjects) {
+        for (const [name, items] of Object.entries(fieldObjects)) {
+          if (items && items.length > 0) {
+            const item = items[0];
+            fields[name] = item.value ?? item.defaultValue ?? '';
+          }
+        }
+      }
+    } catch(e) {
+      console.warn('getFieldObjects failed, trying getAnnotations:', e);
+      // Fallback: read via page annotations
+      for (let i=1; i<=pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const anns = await page.getAnnotations();
+        for (const ann of anns) {
+          if (ann.fieldName && ann.fieldValue != null) {
+            fields[ann.fieldName] = ann.fieldValue;
+          }
         }
       }
     }
-    // Use form fields if available, fall back to text parsing
-    const hasFields = Object.keys(fields).some(k => fields[k] && fields[k] !== '' && fields[k] !== '/Off');
+
+    const hasFields = Object.values(fields).some(v => v && v !== '' && v !== '/Off' && v !== 'Off');
     const parsed = hasFields ? parsePdfFields(fields, fullText) : parsePdfText(fullText);
     fillTxFormFromPdf(parsed);
   } catch(e) {
