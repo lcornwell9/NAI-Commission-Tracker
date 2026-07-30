@@ -1586,17 +1586,92 @@ async function handlePdfFile(file) {
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({data: buf}).promise;
     let fullText = '';
+    const fields = {};
     for (let i=1; i<=pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const content = await page.getTextContent();
       fullText += content.items.map(it=>it.str).join(' ') + '\n';
+      // Read form field values from annotations
+      const anns = await page.getAnnotations();
+      for (const ann of anns) {
+        if (ann.fieldName && ann.fieldValue !== undefined && ann.fieldValue !== null) {
+          fields[ann.fieldName] = ann.fieldValue;
+        }
+      }
     }
-    const parsed = parsePdfText(fullText);
+    // Use form fields if available, fall back to text parsing
+    const hasFields = Object.keys(fields).some(k => fields[k] && fields[k] !== '' && fields[k] !== '/Off');
+    const parsed = hasFields ? parsePdfFields(fields, fullText) : parsePdfText(fullText);
     fillTxFormFromPdf(parsed);
   } catch(e) {
     console.error('PDF parse error:', e);
     alert('Could not parse PDF. Please fill in the form manually.');
   }
+}
+
+function parsePdfFields(fields, text) {
+  const result = {};
+
+  // Form type from page text
+  if (/LEASE/i.test(text)) result.formType = 'lease';
+  else if (/SALE/i.test(text)) result.formType = 'sale';
+  else if (/BOV/i.test(text)) result.formType = 'bov';
+  result.leaseSale = result.formType === 'lease' ? 'Lease' : result.formType === 'sale' ? 'Sale' : '';
+
+  // Property address
+  const addr = fields['Address'] || '';
+  const city = fields['City State Zip'] || '';
+  if (addr && city) result.propertyAddress = addr.trim() + ', ' + city.trim();
+  else if (addr) result.propertyAddress = addr.trim();
+
+  // Property type (checkboxes — value '/On' when checked)
+  const isOn = v => v === '/On' || v === 'On' || v === true;
+  for (const t of ['Retail','Office','Industrial','Land','Special Purpose']) {
+    if (isOn(fields[t])) { result.type = t; break; }
+  }
+
+  // Use type: 'undefined' = Investment Sale, 'undefined_2' = End User
+  if (isOn(fields['undefined_2'])) result.useType = 'User';
+  else if (isOn(fields['undefined'])) result.useType = 'Investment';
+
+  // Client: tenant for lease, buyer for sale
+  result.clientName = (result.formType === 'lease'
+    ? fields['Tenant Name'] : fields['Buyer Name'] || fields['Tenant Name']) || '';
+  result.clientName = result.clientName.trim();
+
+  // Dates — convert "Month D, YYYY" → YYYY-MM-DD for date inputs
+  function parseDate(s) {
+    if (!s) return '';
+    const d = new Date(s);
+    if (!isNaN(d)) return d.toISOString().slice(0,10);
+    return '';
+  }
+  result.contractDate = parseDate(fields['Lease Date'] || fields['Contract Date'] || '');
+  result.closingDate  = parseDate(fields['Commencement Date'] || fields['Closing Date'] || '');
+
+  // Numeric fields — strip $, commas
+  function parseNum(v) {
+    if (!v) return null;
+    const n = parseFloat(String(v).replace(/[$,]/g,''));
+    return isNaN(n) ? null : n;
+  }
+  result.transactionValue = parseNum(fields['Transaction Value']);
+  result.sqFtg = parseNum(fields['Total SF Acres']);
+  result.totalCommission = parseNum(fields['Commission to NAI']) || parseNum(fields['Gross Commission']);
+
+  // Team members: Team Name1–4 with %1–4
+  result.team = [];
+  for (let i=1; i<=4; i++) {
+    const name = (fields[`Team Name${i}`] || '').trim();
+    const pct  = parseNum(fields[`%${i}`]);
+    if (name && pct > 0) result.team.push({ name, pct });
+  }
+
+  // Notes: payment timing info
+  const payNote = fields['When will this fee be due'] || '';
+  if (payNote) result.notes = payNote.trim();
+
+  return result;
 }
 
 function parsePdfText(text) {
