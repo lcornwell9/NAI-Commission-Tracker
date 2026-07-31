@@ -1672,10 +1672,22 @@ async function handlePdfFile(file) {
 function parsePdfFields(fields, text) {
   const result = {};
 
-  // Form type from page text
-  if (/LEASE/i.test(text)) result.formType = 'lease';
-  else if (/SALE/i.test(text)) result.formType = 'sale';
+  // Form type — check specific phrases first so "SALE Transaction Reporting Form"
+  // isn't beaten by a stray "Lease" word that appears in many sale forms.
+  if (/SALE\s+Transaction\s+Reporting/i.test(text)) result.formType = 'sale';
+  else if (/LEASE\s+Transaction\s+Reporting/i.test(text)) result.formType = 'lease';
   else if (/BOV/i.test(text)) result.formType = 'bov';
+  else if (/SALE/i.test(text) && !/LEASE/i.test(text)) result.formType = 'sale';
+  else if (/LEASE/i.test(text)) result.formType = 'lease';
+
+  // Also infer from fields: if a buyer/seller field is populated → sale
+  const buyerVal = fields['Buyer Name'] || fields['Buyer'] || fields['Seller Name'] || fields['Seller'] || fields['Buyer / Seller'] || '';
+  const tenantVal = fields['Tenant Name'] || fields['Tenant'] || '';
+  if (!result.formType) {
+    if (buyerVal) result.formType = 'sale';
+    else if (tenantVal) result.formType = 'lease';
+  }
+
   result.leaseSale = result.formType === 'lease' ? 'Lease' : result.formType === 'sale' ? 'Sale' : '';
 
   // Property address
@@ -1694,10 +1706,12 @@ function parsePdfFields(fields, text) {
   if (isOn(fields['undefined_2'])) result.useType = 'User';
   else if (isOn(fields['undefined'])) result.useType = 'Investment';
 
-  // Client: tenant for lease, buyer for sale
-  result.clientName = (result.formType === 'lease'
-    ? fields['Tenant Name'] : fields['Buyer Name'] || fields['Tenant Name']) || '';
-  result.clientName = result.clientName.trim();
+  // Client: tenant for lease; buyer/seller for sale — try multiple field name variants
+  if (result.formType === 'lease') {
+    result.clientName = (tenantVal).trim();
+  } else {
+    result.clientName = (buyerVal || tenantVal).trim();
+  }
 
   // Dates — convert "Month D, YYYY" → YYYY-MM-DD for date inputs
   function parseDate(s) {
@@ -1706,8 +1720,14 @@ function parsePdfFields(fields, text) {
     if (!isNaN(d)) return d.toISOString().slice(0,10);
     return '';
   }
-  result.contractDate = parseDate(fields['Lease Date'] || fields['Contract Date'] || '');
-  result.closingDate  = parseDate(fields['Commencement Date'] || fields['Closing Date'] || '');
+  // Sale forms use "Contract Date" / "Closing Date"; lease forms use "Lease Date" / "Commencement Date"
+  if (result.formType === 'sale') {
+    result.contractDate = parseDate(fields['Contract Date'] || fields['Lease Date'] || '');
+    result.closingDate  = parseDate(fields['Closing Date'] || fields['Commencement Date'] || '');
+  } else {
+    result.contractDate = parseDate(fields['Lease Date'] || fields['Contract Date'] || '');
+    result.closingDate  = parseDate(fields['Commencement Date'] || fields['Closing Date'] || '');
+  }
 
   // Numeric fields — strip $, commas
   function parseNum(v) {
