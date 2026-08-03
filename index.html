@@ -1884,11 +1884,12 @@ function fillTxFormFromPdf(parsed) {
 // ============================================================
 function openImportModal() {
   openModal('Import Excel Spreadsheet', `
-    <div class="alert alert-info">Import from your 2026 NAI Red Transactions spreadsheet. Columns are auto-detected from headers.</div>
+    <div class="alert alert-info">Import from any year's NAI Red Transactions spreadsheet. Year is auto-detected from the filename.</div>
     <div class="form-group">
       <label>Import Mode</label>
       <select id="import-mode">
-        <option value="full">Full Year — update matching properties, keep others</option>
+        <option value="addhistory">Add History — safe merge, never overwrites existing transactions ✅ recommended</option>
+        <option value="full">Full Year — replaces matching properties for this year, keeps others</option>
         <option value="replace">Replace All — wipe all existing transactions first (fresh import)</option>
         <option value="pending">Pending AR Only — import only outstanding AR (col Q negative)</option>
       </select>
@@ -2166,34 +2167,84 @@ async function runImport() {
       });
     }
 
-    showImportPreview(newTxs, mode, detectedYear, async ()=>{
-      state.transactions.push(...newTxs);
-      await saveToGist();
-      closeModal();
-      renderPage();
-    });
+    if (mode === 'addhistory') {
+      // Build a set of existing (address + client) keys — never overwrite these
+      const existingKeys = new Set(
+        state.transactions.map(t =>
+          (t.propertyAddress||'').toLowerCase().trim() + '|||' + (t.clientName||'').toLowerCase().trim()
+        )
+      );
+      const toAdd    = newTxs.filter(tx => !existingKeys.has(
+        (tx.propertyAddress||'').toLowerCase().trim() + '|||' + (tx.clientName||'').toLowerCase().trim()
+      ));
+      const skipped  = newTxs.length - toAdd.length;
+      showImportPreview(toAdd, mode, detectedYear, async ()=>{
+        state.transactions.push(...toAdd);
+        await saveToGist();
+        closeModal();
+        renderPage();
+      }, skipped);
+    } else {
+      showImportPreview(newTxs, mode, detectedYear, async ()=>{
+        state.transactions.push(...newTxs);
+        await saveToGist();
+        closeModal();
+        renderPage();
+      });
+    }
   }
 }
 
-function showImportPreview(newTxs, mode, year, onConfirm) {
-  const recCount = newTxs.reduce((s,t)=>s+t.payments.filter(p=>p.status==='received').length,0);
+function showImportPreview(newTxs, mode, year, onConfirm, skipped=0) {
+  const recCount  = newTxs.reduce((s,t)=>s+t.payments.filter(p=>p.status==='received').length,0);
   const pendCount = newTxs.reduce((s,t)=>s+t.payments.filter(p=>p.status==='pending').length,0);
   const recTotal  = newTxs.reduce((s,t)=>s+t.payments.filter(p=>p.status==='received').reduce((a,p)=>a+p.amount,0),0);
   const pendTotal = newTxs.reduce((s,t)=>s+t.payments.filter(p=>p.status==='pending').reduce((a,p)=>a+p.amount,0),0);
 
-  const previewRows = newTxs.slice(0,10).map(t=>`<tr><td>${esc(t.propertyAddress)}</td><td>${esc(getTxBrokerLabel(t))}</td><td>${t.payments.filter(p=>p.status==='received').length} rcvd / ${t.payments.filter(p=>p.status==='pending').length} pend</td></tr>`).join('');
+  const modeLabels = {
+    addhistory: 'Add History (safe merge)',
+    full: 'Full Year (replace matching)',
+    replace: 'Replace All',
+    pending: 'Pending AR Only',
+  };
+
+  const skippedNote = skipped > 0
+    ? `<br><span style="color:var(--success)">✓ ${skipped} already-existing transaction${skipped===1?'':'s'} will be left untouched.</span>`
+    : '';
+
+  const noNewNote = newTxs.length === 0
+    ? `<div class="alert alert-warning" style="margin-top:8px">All transactions in this file already exist in the tracker — nothing new to add.</div>`
+    : '';
+
+  const previewRows = newTxs.slice(0,15).map(t=>{
+    const rcvd = t.payments.filter(p=>p.status==='received');
+    const pend = t.payments.filter(p=>p.status==='pending');
+    const rcvdAmt = rcvd.reduce((s,p)=>s+p.amount,0);
+    return `<tr>
+      <td>${esc(t.propertyAddress)}</td>
+      <td>${esc(getTxBrokerLabel(t))}</td>
+      <td style="color:var(--success)">${rcvd.length>0?fmtD(rcvdAmt):'—'}</td>
+      <td style="color:${pend.length>0?'var(--danger)':'var(--muted)'}">${pend.length>0?fmtD(pend.reduce((s,p)=>s+p.amount,0)):'—'}</td>
+    </tr>`;
+  }).join('');
+
   document.getElementById('import-preview').innerHTML = `
     <div class="alert alert-info" style="margin-top:14px">
-      <strong>Preview: ${newTxs.length} transactions</strong> for ${year} (${mode} mode)<br>
+      <strong>${newTxs.length} transaction${newTxs.length===1?'':'s'} to import</strong> — ${year} · ${modeLabels[mode]||mode}<br>
       ${recCount} received payments totaling ${fmtD(recTotal)} · ${pendCount} pending totaling ${fmtD(pendTotal)}
+      ${skippedNote}
     </div>
-    <div style="max-height:200px;overflow-y:auto;margin-bottom:12px">
-      <table><thead><tr><th>Property</th><th>Broker</th><th>Payments</th></tr></thead>
-      <tbody>${previewRows}${newTxs.length>10?`<tr><td colspan="3" style="color:var(--muted);text-align:center">…and ${newTxs.length-10} more</td></tr>`:''}</tbody></table>
-    </div>
+    ${noNewNote}
+    ${newTxs.length > 0 ? `
+    <div style="max-height:220px;overflow-y:auto;margin-bottom:12px">
+      <table>
+        <thead><tr><th>Property</th><th>Broker</th><th class="td-mono">Received</th><th class="td-mono">Pending AR</th></tr></thead>
+        <tbody>${previewRows}${newTxs.length>15?`<tr><td colspan="4" style="color:var(--muted);text-align:center">…and ${newTxs.length-15} more</td></tr>`:''}</tbody>
+      </table>
+    </div>` : ''}
     <div class="modal-footer">
-      <button class="btn btn-ghost" onclick="document.getElementById('import-preview').innerHTML=''">Cancel</button>
-      <button class="btn btn-primary" onclick="confirmImport()">Confirm Import</button>
+      <button class="btn btn-ghost" onclick="document.getElementById('import-preview').innerHTML=''">Back</button>
+      ${newTxs.length > 0 ? `<button class="btn btn-primary" onclick="confirmImport()">Confirm Import</button>` : ''}
     </div>`;
   window._pendingImportConfirm = onConfirm;
 }
