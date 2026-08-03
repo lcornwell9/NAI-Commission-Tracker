@@ -1930,14 +1930,22 @@ function previewCleanupStalePending() {
   const rows = stale.map(t => {
     const pendAmt = t.payments.filter(p=>p.status==='pending').reduce((s,p)=>s+p.amount,0);
     const hasRec  = t.payments.some(p=>p.status==='received');
-    const action  = hasRec ? 'keep history' : 'delete entirely';
-    return `<div class="stale-row" data-id="${t.id}" data-selected="1"
+    // Default: delete if no received payments, strip if has received payments
+    const defaultAction = hasRec ? 'strip' : 'delete';
+    const actionLabel   = hasRec ? 'strip pending only' : 'delete entirely';
+    const actionToggle  = !hasRec
+      ? `<button class="stale-action-btn" data-id="${t.id}" data-action="delete"
+           onclick="event.stopPropagation();toggleStaleAction(this)"
+           style="font-size:10px;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:#fff;cursor:pointer;color:var(--danger);white-space:nowrap">
+           🗑 delete entirely</button>`
+      : `<span style="font-size:10px;color:var(--muted)">strip pending only</span>`;
+    return `<div class="stale-row" data-id="${t.id}" data-selected="1" data-action="${defaultAction}"
       onclick="toggleStaleRow(this)"
       style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;background:var(--bg-subtle)">
       <div class="stale-check" style="width:22px;height:22px;border-radius:4px;border:2px solid var(--navy);background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0">✓</div>
       <div style="flex:1;min-width:0">
         <div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.propertyAddress||'—')}</div>
-        <div style="font-size:11px;color:var(--muted)">${t.fiscalYear||'?'} · ${action}</div>
+        <div style="font-size:11px;margin-top:2px">${t.fiscalYear||'?'} · ${actionToggle}</div>
       </div>
       <div style="font-family:monospace;font-size:13px;color:var(--danger);flex-shrink:0">${fmtD(pendAmt)}</div>
     </div>`;
@@ -1962,6 +1970,22 @@ function previewCleanupStalePending() {
 
   window._staleTxs = stale;
   updateStaleTotal();
+}
+
+function toggleStaleAction(btn) {
+  const row = btn.closest('.stale-row');
+  const cur = btn.dataset.action;
+  if (cur === 'delete') {
+    btn.dataset.action = 'strip';
+    btn.textContent = '✂ strip pending only';
+    btn.style.color = 'var(--navy)';
+    if (row) row.dataset.action = 'strip';
+  } else {
+    btn.dataset.action = 'delete';
+    btn.textContent = '🗑 delete entirely';
+    btn.style.color = 'var(--danger)';
+    if (row) row.dataset.action = 'delete';
+  }
 }
 
 function toggleStaleRow(el) {
@@ -2002,14 +2026,19 @@ function updateStaleTotal() {
 }
 
 async function confirmCleanupStalePending() {
-  const checked = new Set([...document.querySelectorAll('.stale-row[data-selected="1"]')].map(el=>el.dataset.id));
-  if (checked.size === 0) { alert('No transactions selected.'); return; }
+  const selectedRows = [...document.querySelectorAll('.stale-row[data-selected="1"]')];
+  if (selectedRows.length === 0) { alert('No transactions selected.'); return; }
+
+  // Build a map of id → action ('strip' or 'delete') from each row's data-action
+  const actionMap = {};
+  selectedRows.forEach(el => { actionMap[el.dataset.id] = el.dataset.action || 'delete'; });
 
   state.transactions = state.transactions.filter(t => {
-    if (!checked.has(t.id)) return true; // not selected — leave untouched
+    if (!(t.id in actionMap)) return true; // not selected — leave untouched
     // Strip pending payments
     t.payments = t.payments.filter(p => p.status === 'received');
-    return t.payments.length > 0; // delete if nothing received at all
+    // Keep the transaction if action is 'strip' OR if it still has received payments
+    return actionMap[t.id] === 'strip' || t.payments.length > 0;
   });
 
   await saveToGist();
