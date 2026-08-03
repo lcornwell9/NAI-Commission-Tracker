@@ -1930,37 +1930,28 @@ function previewCleanupStalePending() {
   const rows = stale.map(t => {
     const pendAmt = t.payments.filter(p=>p.status==='pending').reduce((s,p)=>s+p.amount,0);
     const hasRec  = t.payments.some(p=>p.status==='received');
-    const action  = hasRec ? 'Strip pending' : 'Delete transaction';
-    return `<tr>
-      <td style="padding:6px 8px"><input type="checkbox" class="stale-chk" data-id="${t.id}" checked></td>
-      <td style="padding:6px 8px">${esc(t.propertyAddress||'—')}</td>
-      <td style="padding:6px 8px;text-align:center">${t.fiscalYear||'?'}</td>
-      <td style="padding:6px 8px;text-align:right;font-family:monospace;color:var(--danger)">${fmtD(pendAmt)}</td>
-      <td style="padding:6px 8px;color:var(--muted);font-size:11px">${action}</td>
-    </tr>`;
+    const action  = hasRec ? 'keep history' : 'delete entirely';
+    return `<div class="stale-row" data-id="${t.id}" data-selected="1"
+      onclick="toggleStaleRow(this)"
+      style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;background:var(--bg-subtle)">
+      <div class="stale-check" style="width:22px;height:22px;border-radius:4px;border:2px solid var(--navy);background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0">✓</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.propertyAddress||'—')}</div>
+        <div style="font-size:11px;color:var(--muted)">${t.fiscalYear||'?'} · ${action}</div>
+      </div>
+      <div style="font-family:monospace;font-size:13px;color:var(--danger);flex-shrink:0">${fmtD(pendAmt)}</div>
+    </div>`;
   }).join('');
 
   document.getElementById('import-preview').innerHTML = `
     <div style="margin-top:12px">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-        <span style="font-weight:600;font-size:13px">${stale.length} historical transactions with pending AR</span>
-        <span style="font-size:12px;color:var(--muted)">
-          <label style="cursor:pointer"><input type="checkbox" id="stale-chk-all" checked onchange="document.querySelectorAll('.stale-chk').forEach(c=>c.checked=this.checked);updateStaleTotal()"> Select all</label>
-        </span>
+      <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+        <span style="font-size:13px;font-weight:600;flex:1">${stale.length} transactions — tap to toggle</span>
+        <button class="btn btn-ghost btn-sm" onclick="setAllStale(1)">Select All</button>
+        <button class="btn btn-ghost btn-sm" onclick="setAllStale(0)">Deselect All</button>
       </div>
-      <div style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:10px">
-        <table style="width:100%;border-collapse:collapse">
-          <thead style="position:sticky;top:0;background:var(--navy);color:#fff">
-            <tr>
-              <th style="padding:6px 8px;width:32px"></th>
-              <th style="padding:6px 8px;text-align:left">Property</th>
-              <th style="padding:6px 8px;text-align:center">Year</th>
-              <th style="padding:6px 8px;text-align:right">Pending AR</th>
-              <th style="padding:6px 8px;text-align:left">Action</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
+      <div style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:10px">
+        ${rows}
       </div>
       <div id="stale-total" style="font-size:13px;color:var(--muted);margin-bottom:10px"></div>
       <div class="modal-footer" style="padding:0">
@@ -1969,24 +1960,49 @@ function previewCleanupStalePending() {
       </div>
     </div>`;
 
-  // Wire up checkboxes to update running total
-  document.querySelectorAll('.stale-chk').forEach(c => c.addEventListener('change', updateStaleTotal));
-  updateStaleTotal();
-
-  // Store stale list for confirm step
   window._staleTxs = stale;
+  updateStaleTotal();
+}
+
+function toggleStaleRow(el) {
+  const sel = el.dataset.selected === '1';
+  el.dataset.selected = sel ? '0' : '1';
+  const chk = el.querySelector('.stale-check');
+  if (chk) {
+    chk.textContent = sel ? '' : '✓';
+    chk.style.background = sel ? '#fff' : 'var(--navy)';
+    chk.style.borderColor = sel ? 'var(--border)' : 'var(--navy)';
+    chk.style.color = sel ? 'transparent' : '#fff';
+  }
+  el.style.background = sel ? '#fff' : 'var(--bg-subtle)';
+  updateStaleTotal();
+}
+
+function setAllStale(val) {
+  document.querySelectorAll('.stale-row').forEach(el => {
+    el.dataset.selected = val ? '1' : '0';
+    const chk = el.querySelector('.stale-check');
+    if (chk) {
+      chk.textContent = val ? '✓' : '';
+      chk.style.background = val ? 'var(--navy)' : '#fff';
+      chk.style.borderColor = val ? 'var(--navy)' : 'var(--border)';
+      chk.style.color = val ? '#fff' : 'transparent';
+    }
+    el.style.background = val ? 'var(--bg-subtle)' : '#fff';
+  });
+  updateStaleTotal();
 }
 
 function updateStaleTotal() {
-  const checked = new Set([...document.querySelectorAll('.stale-chk:checked')].map(c=>c.dataset.id));
-  const selected = (window._staleTxs||[]).filter(t=>checked.has(t.id));
+  const selectedIds = new Set([...document.querySelectorAll('.stale-row[data-selected="1"]')].map(el=>el.dataset.id));
+  const selected = (window._staleTxs||[]).filter(t=>selectedIds.has(t.id));
   const total = selected.reduce((s,t)=>s+t.payments.filter(p=>p.status==='pending').reduce((a,p)=>a+p.amount,0),0);
   const el = document.getElementById('stale-total');
-  if (el) el.textContent = `${selected.length} selected · ${fmtD(total)} pending AR will be removed`;
+  if (el) el.textContent = selected.length > 0 ? `${selected.length} selected · ${fmtD(total)} pending AR will be removed` : 'None selected';
 }
 
 async function confirmCleanupStalePending() {
-  const checked = new Set([...document.querySelectorAll('.stale-chk:checked')].map(c=>c.dataset.id));
+  const checked = new Set([...document.querySelectorAll('.stale-row[data-selected="1"]')].map(el=>el.dataset.id));
   if (checked.size === 0) { alert('No transactions selected.'); return; }
 
   state.transactions = state.transactions.filter(t => {
