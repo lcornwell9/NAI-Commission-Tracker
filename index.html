@@ -259,14 +259,21 @@ function resolveBrokerName(raw) {
   if (key in BROKER_ALIASES) {
     const canonical = BROKER_ALIASES[key];
     if (!canonical) return null; // NAI Red etc — skip
-    // Get or create the broker by canonical name so imports always resolve correctly
-    // Case-insensitive so "Mcqueen" matches canonical "McQueen"
-    let b = state.brokers.find(x => x.name.toLowerCase() === canonical.toLowerCase());
+    const cl = canonical.toLowerCase();
+    // 1. Exact match (e.g. broker stored as 'McQueen')
+    let b = state.brokers.find(x => x.name.toLowerCase() === cl);
+    // 2. Starts-with match (e.g. canonical 'Abbey' matches broker 'Abbey Sullivan')
+    if (!b) b = state.brokers.find(x => x.name.toLowerCase().startsWith(cl + ' '));
+    // 3. Contains match as last resort
+    if (!b) b = state.brokers.find(x => x.name.toLowerCase().includes(cl));
+    // 4. Create if truly not found
     if (!b) { b = {id:makeId(), name:canonical, active:true, createdAt:new Date().toISOString()}; state.brokers.push(b); }
-    else if (b.name !== canonical) b.name = canonical; // fix capitalisation in-place
     return b;
   }
-  return state.brokers.find(b => b.name.toLowerCase() === key) || null;
+  // No alias — try exact, then starts-with
+  return state.brokers.find(b => b.name.toLowerCase() === key)
+      || state.brokers.find(b => b.name.toLowerCase().startsWith(key + ' '))
+      || null;
 }
 
 // ============================================================
@@ -1845,7 +1852,9 @@ function fillTxFormFromPdf(parsed) {
   if (parsed.sqFtg) { const el=document.getElementById('tf-sqft'); if(el) el.value=parsed.sqFtg; }
 
   // Populate team section from PDF
-  if (parsed.team && parsed.team.length > 0) {
+  // A single member at 100% is a solo deal — set primary broker only, no team checkbox
+  const isActualTeam = parsed.team && parsed.team.length > 1;
+  if (isActualTeam) {
     const isTeamChk = document.getElementById('tf-is-team');
     const teamSec = document.getElementById('tf-team-section');
     const teamRows = document.getElementById('tf-team-rows');
@@ -1858,15 +1867,11 @@ function fillTxFormFromPdf(parsed) {
         addTeamRow(broker?.id || '', member.pct);
       }
     }
-    // Set primary broker to first matched team member
+  }
+  // Always set primary broker to first matched team member
+  if (parsed.team && parsed.team.length > 0) {
     const first = resolveBrokerName(parsed.team[0]?.name);
     if (first) { const el=document.getElementById('tf-broker'); if(el) el.value=first.id; }
-  } else {
-    // Single broker — try to match from PDF if broker name present
-    for (const member of (parsed.team||[])) {
-      const broker = resolveBrokerName(member.name);
-      if (broker) { const el=document.getElementById('tf-broker'); if(el) el.value=broker.id; break; }
-    }
   }
 
   // Show a notification
@@ -2322,10 +2327,38 @@ async function deleteBroker(id) {
 // ============================================================
 // REPORTS PAGE
 // ============================================================
+
+// Returns {isTTM, year, label} for report period selectors.
+// yearVal can be a 4-digit year string or "TTM" (trailing 12 months).
+function parsePeriodFilter(yearVal) {
+  if (yearVal === 'TTM') {
+    const cutoff = new Date();
+    cutoff.setFullYear(cutoff.getFullYear() - 1);
+    return { isTTM: true, year: null, ttmCutoff: cutoff, label: 'Last 12 Months' };
+  }
+  const y = parseInt(yearVal) || state.settings.fiscalYear || new Date().getFullYear();
+  return { isTTM: false, year: y, ttmCutoff: null, label: String(y) };
+}
+
+function pmtInFilter(pmt, filter) {
+  if (pmt.status !== 'received' || !pmt.receivedDate) return false;
+  if (filter.isTTM) return new Date(pmt.receivedDate + 'T12:00:00') >= filter.ttmCutoff;
+  return fiscalYearOf(pmt.receivedDate) === filter.year;
+}
+
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 200);
+}
+
 function renderReports(mc) {
   const year = state.settings.fiscalYear || new Date().getFullYear();
   const availYears = getAvailableYears();
-  const yearOpts = availYears.map(y=>`<option value="${y}">${y}</option>`).join('');
+  const yearOpts = `<option value="TTM">Last 12 Months</option>` + availYears.map(y=>`<option value="${y}"${y===year?' selected':''}>${y}</option>`).join('');
   const brokerOpts = state.brokers.map(b=>`<option value="${b.id}">${esc(b.name)}</option>`).join('');
 
   mc.innerHTML = `
@@ -2377,14 +2410,31 @@ function renderReports(mc) {
     </div>
   </div>
 
-  <!-- Report 3: Reconciliation -->
+  <!-- Report 3: Insurance / Transaction Size -->
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-header"><div class="card-title">🛡️ Insurance Summary</div></div>
+    <div class="card-body">
+      <div class="form-row cols-2">
+        <div class="form-group"><label>Year</label>
+          <select id="r3-year">${yearOpts}</select>
+        </div>
+        <div class="form-group" style="display:flex;align-items:flex-end;gap:8px">
+          <button class="btn btn-navy btn-sm" onclick="generateInsuranceReport()">Generate</button>
+          <button class="btn btn-ghost btn-sm" onclick="downloadInsuranceXLSX()">⬇ Excel</button>
+        </div>
+      </div>
+      <div id="r3-output"></div>
+    </div>
+  </div>
+
+  <!-- Report 4: Reconciliation -->
   <div class="card">
     <div class="card-header"><div class="card-title">🔍 Reconciliation Tool</div></div>
     <div class="card-body">
       <div class="alert alert-info">Upload your Excel spreadsheet to compare it against the tracker. Mismatches are highlighted in red.</div>
       <div class="form-group"><label>Excel File</label><input type="file" id="recon-file" accept=".xlsx,.xls"></div>
       <button class="btn btn-navy btn-sm" onclick="runReconciliation()">Run Reconciliation</button>
-      <div id="r3-output" style="margin-top:16px"></div>
+      <div id="r4-output" style="margin-top:16px"></div>
     </div>
   </div>`;
 }
@@ -2392,14 +2442,13 @@ function renderReports(mc) {
 // ── BROKER AUDIT REPORT
 function generateBrokerAudit() {
   const brokerId = document.getElementById('r1-broker').value;
-  const year     = parseInt(document.getElementById('r1-year').value) || state.settings.fiscalYear;
+  const filter   = parsePeriodFilter(document.getElementById('r1-year').value);
   const brokers  = brokerId ? state.brokers.filter(b=>b.id===brokerId) : state.brokers;
 
   let tableRows = '';
   let totTV=0, totGrossComm=0, totGrossRec=0, totBrokerPaid=0, totPendAR=0;
 
   for (const broker of brokers) {
-    const brokerRunYtd = {};
     for (const tx of state.transactions) {
       const brokerIds = getTxBrokerIds(tx);
       if (!brokerIds.includes(broker.id)) continue;
@@ -2410,7 +2459,7 @@ function generateBrokerAudit() {
         share = m ? m.pct/100 : 0;
       }
 
-      const recPmts  = tx.payments.filter(p=>p.status==='received' && fiscalYearOf(p.receivedDate)===year);
+      const recPmts  = tx.payments.filter(p=>pmtInFilter(p, filter));
       const pendPmts = tx.payments.filter(p=>p.status==='pending');
       const grossComm = (tx.totalCommission||0) * share;
       const grossRec  = recPmts.reduce((s,p)=>s+p.amount*share,0);
@@ -2421,13 +2470,14 @@ function generateBrokerAudit() {
       // Broker net using running YTD
       let brokerPaid = 0;
       for (const pmt of recPmts) {
-        const pmtYear = fiscalYearOf(pmt.receivedDate)||year;
+        const pmtYear = fiscalYearOf(pmt.receivedDate) || new Date().getFullYear();
         const ytd = getBrokerRunningYtd(broker.id, pmtYear, pmt.id);
         brokerPaid += calcSplit(ytd, pmt.amount*share, getBrokerOverridePct(broker.id)).brokerAmount;
       }
 
       // Effective split
-      const effSplit = grossRec > 0 ? getCurrentTierLabel(getBrokerRunningYtd(broker.id, year, null)) : '—';
+      const effSplitYear = filter.isTTM ? new Date().getFullYear() : filter.year;
+      const effSplit = grossRec > 0 ? getCurrentTierLabel(getBrokerRunningYtd(broker.id, effSplitYear, null)) : '—';
 
       totTV       += (tx.transactionValue||0)*share;
       totGrossComm += grossComm;
@@ -2452,7 +2502,7 @@ function generateBrokerAudit() {
   document.getElementById('r1-output').innerHTML = tableRows ? `
     <div class="card" style="padding:0;margin-top:14px">
       <div class="report-header">
-        <h2>Broker Audit — ${year}</h2>
+        <h2>Broker Audit — ${filter.label}</h2>
         <p>${state.settings.companyName} · ${brokerLabel}</p>
       </div>
       <div class="table-wrap">
@@ -2480,15 +2530,16 @@ function generateBrokerAudit() {
 
 // ── PROPERTY TYPE REPORT
 function generateTypeReport() {
-  const year   = parseInt(document.getElementById('r2-year').value) || state.settings.fiscalYear;
-  const period = document.getElementById('r2-period').value;
+  const filter = parsePeriodFilter(document.getElementById('r2-year').value);
+  const period = filter.isTTM ? '' : document.getElementById('r2-period').value;
   const QM = {Q1:[1,2,3],Q2:[4,5,6],Q3:[7,8,9],Q4:[10,11,12]};
   const types = ['Retail','Industrial','Office','Special Purpose','Land'];
 
   function inPeriod(dateStr) {
     if (!dateStr) return false;
     const d = new Date(dateStr+'T12:00:00');
-    if (d.getFullYear()!==year) return false;
+    if (filter.isTTM) return d >= filter.ttmCutoff;
+    if (d.getFullYear()!==filter.year) return false;
     if (period) { const m=d.getMonth()+1; return (QM[period]||[]).includes(m); }
     return true;
   }
@@ -2524,7 +2575,7 @@ function generateTypeReport() {
     detail.push({ address:tx.propertyAddress||'—', type:tx.type||'—', leaseSale:tx.leaseSale||'—', sqFtg:tx.sqFtg, tv:tx.transactionValue||0, grossDue:tx.totalCommission||0 });
   }
 
-  // Build summary table
+  // Build summary table by property type
   let sumRows='', totTV=0,totDue=0,totRec=0,totAR=0,totLeases=0,totSales=0;
   for (const tp of types) {
     const s=summary[tp];
@@ -2532,18 +2583,64 @@ function generateTypeReport() {
     totTV+=s.tv;totDue+=s.grossDue;totRec+=s.grossRec;totAR+=s.pendAR;totLeases+=s.leases;totSales+=s.sales;
   }
 
+  // Lease vs Sale vs Land breakdown (gross comm received)
+  let leaseDue=0,saleDue=0,landDue=0,leaseRec=0,saleRec=0,landRec=0,leaseCt=0,saleCt=0,landCt=0;
+  const seenLvS = new Set();
+  for (const tx of state.transactions) {
+    const ls=(tx.leaseSale||'').toLowerCase();
+    const isLandTx=(tx.type||'').toLowerCase()==='land';
+    const recPmts2=tx.payments.filter(p=>inPeriod(p.receivedDate)&&p.status==='received');
+    const rec2=recPmts2.reduce((s,p)=>s+p.amount,0);
+    const due2=tx.totalCommission||0;
+    if (!seenLvS.has(tx.id)&&(recPmts2.length>0||tx.payments.some(p=>p.status==='pending'))) {
+      seenLvS.add(tx.id);
+      if (isLandTx) { landDue+=due2; landCt++; }
+      else if (ls.includes('lease')) { leaseDue+=due2; leaseCt++; }
+      else if (ls.includes('sale')) { saleDue+=due2; saleCt++; }
+    }
+    if (isLandTx) landRec+=rec2;
+    else if (ls.includes('lease')) leaseRec+=rec2;
+    else if (ls.includes('sale')) saleRec+=rec2;
+  }
+
   // Detail list
   const detailRows = detail.sort((a,b)=>(a.type+a.address).localeCompare(b.type+b.address))
     .map(r=>`<tr><td>${esc(r.address)}</td><td>${esc(r.type)}</td><td>${esc(r.leaseSale)}</td><td class="td-mono">${r.sqFtg?r.sqFtg.toLocaleString():'—'}</td><td class="td-mono">${fmtD(r.tv)}</td><td class="td-mono">${fmtD(r.grossDue)}</td></tr>`).join('');
 
-  const periodLabel = period || 'Full Year';
+  const tdS='padding:10px 14px;border-bottom:1px solid var(--border)';
+  const tdN='padding:10px 14px;border-bottom:1px solid var(--border);text-align:right;font-family:monospace';
   document.getElementById('r2-output').innerHTML = `
     <div class="card" style="padding:0;margin-top:14px">
       <div class="report-header">
-        <h2>Property Type Report — ${year} ${periodLabel}</h2>
+        <h2>Property Type Report — ${filter.label}${!filter.isTTM && period ? ' ' + period : ''}</h2>
         <p>${state.settings.companyName} · All Brokers</p>
       </div>
-      <div style="padding:14px 0 0;font-weight:600;font-size:13px;padding-left:18px;color:var(--navy)">Summary</div>
+
+      <div style="padding:14px 18px 0;font-weight:600;font-size:13px;color:var(--navy)">Gross Commission by Deal Type</div>
+      <div style="padding:10px 18px 16px;display:flex;gap:16px;flex-wrap:wrap">
+        <div style="flex:1;min-width:160px;background:var(--bg-subtle);border-radius:8px;padding:14px 18px;border-left:4px solid var(--navy)">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:4px">Leases (${leaseCt})</div>
+          <div style="font-size:20px;font-weight:700;color:var(--navy)">${fmtD(leaseDue)}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">Received: ${fmtD(leaseRec)}</div>
+        </div>
+        <div style="flex:1;min-width:160px;background:var(--bg-subtle);border-radius:8px;padding:14px 18px;border-left:4px solid var(--red)">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:4px">Sales (${saleCt})</div>
+          <div style="font-size:20px;font-weight:700;color:var(--navy)">${fmtD(saleDue)}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">Received: ${fmtD(saleRec)}</div>
+        </div>
+        <div style="flex:1;min-width:160px;background:var(--bg-subtle);border-radius:8px;padding:14px 18px;border-left:4px solid #8B6914">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:4px">Land (${landCt})</div>
+          <div style="font-size:20px;font-weight:700;color:var(--navy)">${fmtD(landDue)}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">Received: ${fmtD(landRec)}</div>
+        </div>
+        <div style="flex:1;min-width:160px;background:var(--navy);border-radius:8px;padding:14px 18px">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.7);margin-bottom:4px">Total (${leaseCt+saleCt+landCt})</div>
+          <div style="font-size:20px;font-weight:700;color:#fff">${fmtD(leaseDue+saleDue+landDue)}</div>
+          <div style="font-size:11px;color:rgba(255,255,255,.7);margin-top:2px">Received: ${fmtD(leaseRec+saleRec+landRec)}</div>
+        </div>
+      </div>
+
+      <div style="padding:4px 18px 0;font-weight:600;font-size:13px;color:var(--navy)">By Property Type</div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Type</th><th>Leases</th><th>Sales</th><th class="td-mono">TX Value</th><th class="td-mono">Gross Comm Due</th><th class="td-mono">Gross Received</th><th class="td-mono">Pending AR</th></tr></thead>
@@ -2565,6 +2662,161 @@ function generateTypeReport() {
     </div>`;
 }
 
+// ── INSURANCE / TRANSACTION SIZE REPORT
+function buildInsuranceData(filter) {
+  const THRESHOLD = 1_000_000;
+  const under = { count:0, tv:0, grossDue:0, txs:[] };
+  const over  = { count:0, tv:0, grossDue:0, txs:[] };
+
+  for (const tx of state.transactions) {
+    // Include transaction if it has any payment (received in period OR still pending)
+    const hasRecInPeriod = tx.payments.some(p => pmtInFilter(p, filter));
+    const hasPending     = tx.payments.some(p => p.status === 'pending');
+    if (!hasRecInPeriod && !hasPending) continue;
+
+    const tv  = tx.transactionValue || 0;
+    const due = tx.totalCommission  || 0;
+    const bucket = tv <= THRESHOLD ? under : over;
+    bucket.count++;
+    bucket.tv      += tv;
+    bucket.grossDue += due;
+    bucket.txs.push(tx);
+  }
+  return { under, over, THRESHOLD };
+}
+
+function generateInsuranceReport() {
+  const filter = parsePeriodFilter(document.getElementById('r3-year').value);
+  const { under, over, THRESHOLD } = buildInsuranceData(filter);
+  const total = { count: under.count+over.count, tv: under.tv+over.tv, grossDue: under.grossDue+over.grossDue };
+
+  function txRows(txList) {
+    return txList.sort((a,b)=>(b.transactionValue||0)-(a.transactionValue||0))
+      .map(tx=>{
+        const ls = tx.leaseSale||'—';
+        const tp = tx.type||'—';
+        const recAmt = tx.payments.filter(p=>p.status==='received').reduce((s,p)=>s+p.amount,0);
+        const pendAmt = tx.payments.filter(p=>p.status==='pending').reduce((s,p)=>s+p.amount,0);
+        return `<tr>
+          <td>${esc(tx.propertyAddress||'—')}</td>
+          <td>${esc(tx.clientName||'—')}</td>
+          <td>${esc(tp)}</td>
+          <td>${esc(ls)}</td>
+          <td class="td-mono">${fmtD(tx.transactionValue||0)}</td>
+          <td class="td-mono">${fmtD(tx.totalCommission||0)}</td>
+          <td class="td-mono" style="color:var(--success)">${recAmt>0?fmtD(recAmt):'—'}</td>
+          <td class="td-mono" style="color:${pendAmt>0?'var(--danger)':'var(--muted)'}">${pendAmt>0?fmtD(pendAmt):'—'}</td>
+        </tr>`;
+      }).join('');
+  }
+
+  const colHdrs = `<tr><th>Property Address</th><th>Client</th><th>Type</th><th>Lease/Sale</th>
+    <th class="td-mono">TX Value</th><th class="td-mono">Gross Comm</th>
+    <th class="td-mono">Received</th><th class="td-mono">Pending AR</th></tr>`;
+
+  document.getElementById('r3-output').innerHTML = `
+    <div style="margin-top:14px">
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
+        <div style="flex:1;min-width:180px;background:var(--bg-subtle);border-radius:8px;padding:16px 20px;border-left:4px solid var(--navy)">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:4px">≤ $1,000,000</div>
+          <div style="font-size:28px;font-weight:800;color:var(--navy)">${under.count}</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px">transactions</div>
+          <div style="font-size:13px;font-weight:600;margin-top:8px">${fmtD(under.grossDue)} gross comm</div>
+          <div style="font-size:11px;color:var(--muted)">${fmtD(under.tv)} total TX value</div>
+        </div>
+        <div style="flex:1;min-width:180px;background:var(--bg-subtle);border-radius:8px;padding:16px 20px;border-left:4px solid var(--red)">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:4px">&gt; $1,000,000</div>
+          <div style="font-size:28px;font-weight:800;color:var(--navy)">${over.count}</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px">transactions</div>
+          <div style="font-size:13px;font-weight:600;margin-top:8px">${fmtD(over.grossDue)} gross comm</div>
+          <div style="font-size:11px;color:var(--muted)">${fmtD(over.tv)} total TX value</div>
+        </div>
+        <div style="flex:1;min-width:180px;background:var(--navy);border-radius:8px;padding:16px 20px">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.7);margin-bottom:4px">All Transactions</div>
+          <div style="font-size:28px;font-weight:800;color:#fff">${total.count}</div>
+          <div style="font-size:12px;color:rgba(255,255,255,.7);margin-top:4px">transactions</div>
+          <div style="font-size:13px;font-weight:600;margin-top:8px;color:#fff">${fmtD(total.grossDue)} gross comm</div>
+          <div style="font-size:11px;color:rgba(255,255,255,.7)">${fmtD(total.tv)} total TX value</div>
+        </div>
+      </div>
+
+      ${over.count > 0 ? `
+      <div style="font-weight:600;font-size:13px;color:var(--navy);margin-bottom:6px">Transactions &gt; $1,000,000 (${over.count})</div>
+      <div class="table-wrap" style="margin-bottom:20px"><table>
+        <thead>${colHdrs}</thead><tbody>${txRows(over.txs)}</tbody>
+      </table></div>` : ''}
+
+      <div style="font-weight:600;font-size:13px;color:var(--navy);margin-bottom:6px">Transactions ≤ $1,000,000 (${under.count})</div>
+      <div class="table-wrap"><table>
+        <thead>${colHdrs}</thead><tbody>${txRows(under.txs)}</tbody>
+      </table></div>
+    </div>`;
+}
+
+async function downloadInsuranceXLSX() {
+  const filter = parsePeriodFilter(document.getElementById('r3-year').value);
+  const { under, over, THRESHOLD } = buildInsuranceData(filter);
+  try {
+    if(typeof ExcelJS==='undefined'){
+      await new Promise((res,rej)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';s.onload=res;s.onerror=()=>rej(new Error('Could not load ExcelJS from CDN'));document.head.appendChild(s);});
+    }
+    const wb=new ExcelJS.Workbook();
+    const NAVY='1a3a5c',RED='C8102E',WHITE='FFFFFF';
+    const currFmt='"$"#,##0.00';
+
+    function makeSheet(name, bucket, label) {
+      const ws=wb.addWorksheet(name);
+      ws.mergeCells('A1:H1');
+      const t1=ws.getCell('A1');
+      t1.value=`${state.settings.companyName} — ${label} (${filter.label})`;
+      t1.font={bold:true,size:13,color:{argb:'FF'+WHITE}};
+      t1.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+(label.includes('>')?RED:NAVY)}};
+      t1.alignment={horizontal:'center',vertical:'middle'};
+      ws.getRow(1).height=26;
+
+      ws.mergeCells('A2:H2');
+      const t2=ws.getCell('A2');
+      t2.value=`${bucket.count} transactions · Total TX Value: ${fmtD(bucket.tv)} · Gross Commission: ${fmtD(bucket.grossDue)}`;
+      t2.font={size:11,color:{argb:'FF'+WHITE}};
+      t2.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};
+      t2.alignment={horizontal:'center'};
+      ws.getRow(2).height=18;
+
+      const hdr=ws.addRow(['Property Address','Client','Type','Lease/Sale','TX Value','Gross Comm Due','Received','Pending AR']);
+      hdr.eachCell(c=>{c.font={bold:true,size:10,color:{argb:'FF'+WHITE}};c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};c.alignment={horizontal:'center'};});
+      [28,20,14,10,14,14,14,12].forEach((w,i)=>ws.getColumn(i+1).width=w);
+
+      const sorted=[...bucket.txs].sort((a,b)=>(b.transactionValue||0)-(a.transactionValue||0));
+      let rowIdx=4;
+      for(const tx of sorted){
+        const recAmt=tx.payments.filter(p=>p.status==='received').reduce((s,p)=>s+p.amount,0);
+        const pendAmt=tx.payments.filter(p=>p.status==='pending').reduce((s,p)=>s+p.amount,0);
+        const dr=ws.addRow([tx.propertyAddress||'',tx.clientName||'',tx.type||'',tx.leaseSale||'',tx.transactionValue||0,tx.totalCommission||0,recAmt||null,pendAmt||null]);
+        [5,6,7,8].forEach(c=>{if(dr.getCell(c).value!=null){dr.getCell(c).numFmt=currFmt;dr.getCell(c).alignment={horizontal:'right'};}});
+        const isEven=rowIdx%2===0;
+        dr.eachCell({includeEmpty:true},cell=>{cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+(isEven?'F0F4F8':'FFFFFF')}};});
+        ws.getRow(rowIdx).height=16;rowIdx++;
+      }
+
+      ws.addRow([]);
+      const tr=ws.addRow(['TOTAL','','','',bucket.tv,bucket.grossDue,null,null]);
+      tr.eachCell({includeEmpty:true},c=>{c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};c.font={bold:true,size:10,color:{argb:'FF'+WHITE}};});
+      [5,6].forEach(c=>{tr.getCell(c).numFmt=currFmt;tr.getCell(c).alignment={horizontal:'right'};});
+      ws.views=[{state:'frozen',ySplit:3}];
+    }
+
+    makeSheet('Over $1M', over, 'Transactions > $1,000,000');
+    makeSheet('Under $1M', under, 'Transactions ≤ $1,000,000');
+
+    const buf=await wb.xlsx.writeBuffer();
+    triggerDownload(new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),
+      `InsuranceSummary_${filter.label.replace(/\s+/g,'_')}.xlsx`);
+  } catch(err) {
+    console.error('Excel export failed:', err);
+    alert('Excel export failed: ' + err.message);
+  }
+}
+
 // ── RECONCILIATION
 async function runReconciliation() {
   const file = document.getElementById('recon-file')?.files?.[0];
@@ -2579,7 +2831,7 @@ async function runReconciliation() {
   for (let i=0;i<Math.min(rows.length,10);i++){
     if(rows[i]?.some(c=>/associate|property address/i.test(String(c||'')))){headerRow=i;break;}
   }
-  if(headerRow<0){document.getElementById('r3-output').innerHTML='<div class="alert alert-danger">Could not find header row.</div>';return;}
+  if(headerRow<0){document.getElementById('r4-output').innerHTML='<div class="alert alert-danger">Could not find header row.</div>';return;}
 
   const headers=rows[headerRow];
   const col={};
@@ -2667,7 +2919,7 @@ async function runReconciliation() {
     </tr>`;
   }
 
-  document.getElementById('r3-output').innerHTML=`
+  document.getElementById('r4-output').innerHTML=`
     ${hasAnyMiss?'<div class="alert alert-warning">⚠️ Some brokers have mismatches (highlighted in red). Tolerance: ±$0.10</div>':'<div class="alert alert-success">✅ All broker totals match within tolerance.</div>'}
     <div class="table-wrap"><table>
       <thead><tr>
@@ -2683,116 +2935,129 @@ async function runReconciliation() {
 // ── EXCEL EXPORTS (Broker Audit)
 async function downloadBrokerAuditXLSX() {
   const brokerId = document.getElementById('r1-broker').value;
-  const year     = parseInt(document.getElementById('r1-year').value)||state.settings.fiscalYear;
+  const filter   = parsePeriodFilter(document.getElementById('r1-year').value);
+  const brokerLabel = brokerId?(state.brokers.find(b=>b.id===brokerId)?.name||'All Brokers'):'All Brokers';
 
-  if(typeof ExcelJS==='undefined'){
-    await new Promise((res,rej)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';s.onload=res;s.onerror=rej;document.head.appendChild(s);});
-  }
-
-  const wb=new ExcelJS.Workbook();
-  const ws=wb.addWorksheet('Broker Audit');
-  const NAVY='1a3a5c',RED='C8102E',WHITE='FFFFFF',GOLD='D4AF37';
-
-  ws.mergeCells('A1:H1');
-  const t1=ws.getCell('A1');
-  t1.value=`${state.settings.companyName} — Broker Audit Report (${year})`;
-  t1.font={bold:true,size:14,color:{argb:'FF'+WHITE}};
-  t1.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};
-  t1.alignment={horizontal:'center',vertical:'middle'};
-  ws.getRow(1).height=28;
-
-  const brokerLabel=brokerId?(state.brokers.find(b=>b.id===brokerId)?.name||'All Brokers'):'All Brokers';
-  ws.mergeCells('A2:H2');
-  const t2=ws.getCell('A2');
-  t2.value=`Broker: ${brokerLabel}`;
-  t2.font={size:11,color:{argb:'FF'+WHITE}};
-  t2.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+RED}};
-  t2.alignment={horizontal:'center',vertical:'middle'};
-  ws.getRow(2).height=18;
-
-  const hdr=['Property Address','Buyer/Seller','TX Value','Gross Comm Due','Gross Received','Split %','Broker Paid','Pending AR'];
-  const hr=ws.addRow(hdr);
-  hr.eachCell(c=>{c.font={bold:true,size:10,color:{argb:'FF'+WHITE}};c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};c.alignment={horizontal:'center',vertical:'middle'};});
-  ws.getRow(3).height=20;
-  [20,20,14,14,14,10,14,12].forEach((w,i)=>ws.getColumn(i+1).width=w);
-
-  const brokers=brokerId?state.brokers.filter(b=>b.id===brokerId):state.brokers;
-  let rowIdx=4,totTV=0,totDue=0,totRec=0,totBN=0,totAR=0;
-  const currFmt='"$"#,##0.00';
-
-  for(const broker of brokers){
-    let firstForBroker=true;
-    for(const tx of state.transactions){
-      const brokerIds=getTxBrokerIds(tx);
-      if(!brokerIds.includes(broker.id))continue;
-      let share=1;
-      if(tx.team&&tx.team.length>0){const m=tx.team.find(mm=>mm.brokerId===broker.id);share=m?m.pct/100:0;}
-      const recPmts=tx.payments.filter(p=>p.status==='received'&&fiscalYearOf(p.receivedDate)===year);
-      const pendPmts=tx.payments.filter(p=>p.status==='pending');
-      if(recPmts.length===0&&pendPmts.length===0)continue;
-      const grossRec=recPmts.reduce((s,p)=>s+p.amount*share,0);
-      const pendAR=pendPmts.reduce((s,p)=>s+p.amount,0);
-      let brokerPaid=0;
-      for(const pmt of recPmts){const ytd=getBrokerRunningYtd(broker.id,fiscalYearOf(pmt.receivedDate)||year,pmt.id);brokerPaid+=calcSplit(ytd,pmt.amount*share,getBrokerOverridePct(broker.id)).brokerAmount;}
-      const grossComm=(tx.totalCommission||0)*share;
-      const effSplit=getCurrentTierLabel(getBrokerRunningYtd(broker.id,year,null));
-      totTV+=(tx.transactionValue||0)*share;totDue+=grossComm;totRec+=grossRec;totBN+=brokerPaid;totAR+=pendAR;
-
-      if(firstForBroker){
-        // broker section header
-        const bhr=ws.addRow([broker.name,'','','','','','','']);
-        ws.mergeCells(`A${rowIdx}:H${rowIdx}`);
-        bhr.getCell(1).font={bold:true,size:11,color:{argb:'FF'+WHITE}};
-        bhr.getCell(1).fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};
-        ws.getRow(rowIdx).height=18;
-        rowIdx++;firstForBroker=false;
-      }
-
-      const dr=ws.addRow([tx.propertyAddress||'',tx.clientName||'',(tx.transactionValue||0)*share,grossComm,grossRec,effSplit,brokerPaid,pendAR]);
-      [3,4,5,7,8].forEach(c=>{dr.getCell(c).numFmt=currFmt;dr.getCell(c).alignment={horizontal:'right'};});
-      dr.getCell(8).font={color:{argb:'FF'+RED}};
-      const isEven=rowIdx%2===0;
-      dr.eachCell({includeEmpty:true},cell=>{cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+(isEven?'F0F4F8':'FFFFFF')}};cell.font=cell.font||{size:10};});
-      ws.getRow(rowIdx).height=16;rowIdx++;
+  try {
+    if(typeof ExcelJS==='undefined'){
+      await new Promise((res,rej)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';s.onload=res;s.onerror=()=>rej(new Error('Could not load ExcelJS from CDN'));document.head.appendChild(s);});
     }
+
+    const wb=new ExcelJS.Workbook();
+    const ws=wb.addWorksheet('Broker Audit');
+    const NAVY='1a3a5c',RED='C8102E',WHITE='FFFFFF';
+
+    ws.mergeCells('A1:H1');
+    const t1=ws.getCell('A1');
+    t1.value=`${state.settings.companyName} — Broker Audit Report (${filter.label})`;
+    t1.font={bold:true,size:14,color:{argb:'FF'+WHITE}};
+    t1.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};
+    t1.alignment={horizontal:'center',vertical:'middle'};
+    ws.getRow(1).height=28;
+
+    ws.mergeCells('A2:H2');
+    const t2=ws.getCell('A2');
+    t2.value=`Broker: ${brokerLabel}`;
+    t2.font={size:11,color:{argb:'FF'+WHITE}};
+    t2.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+RED}};
+    t2.alignment={horizontal:'center',vertical:'middle'};
+    ws.getRow(2).height=18;
+
+    const hdr=['Property Address','Buyer/Seller','TX Value','Gross Comm Due','Gross Received','Split %','Broker Paid','Pending AR'];
+    const hr=ws.addRow(hdr);
+    hr.eachCell(c=>{c.font={bold:true,size:10,color:{argb:'FF'+WHITE}};c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};c.alignment={horizontal:'center',vertical:'middle'};});
+    ws.getRow(3).height=20;
+    [20,20,14,14,14,10,14,12].forEach((w,i)=>ws.getColumn(i+1).width=w);
+
+    const brokers=brokerId?state.brokers.filter(b=>b.id===brokerId):state.brokers;
+    let rowIdx=4,totTV=0,totDue=0,totRec=0,totBN=0,totAR=0;
+    const currFmt='"$"#,##0.00';
+    const effSplitYear = filter.isTTM ? new Date().getFullYear() : filter.year;
+
+    for(const broker of brokers){
+      let firstForBroker=true;
+      for(const tx of state.transactions){
+        const brokerIds=getTxBrokerIds(tx);
+        if(!brokerIds.includes(broker.id))continue;
+        let share=1;
+        if(tx.team&&tx.team.length>0){const m=tx.team.find(mm=>mm.brokerId===broker.id);share=m?m.pct/100:0;}
+        const recPmts=tx.payments.filter(p=>pmtInFilter(p,filter));
+        const pendPmts=tx.payments.filter(p=>p.status==='pending');
+        if(recPmts.length===0&&pendPmts.length===0)continue;
+        const grossRec=recPmts.reduce((s,p)=>s+p.amount*share,0);
+        const pendAR=pendPmts.reduce((s,p)=>s+p.amount,0);
+        let brokerPaid=0;
+        for(const pmt of recPmts){const pmtYear=fiscalYearOf(pmt.receivedDate)||new Date().getFullYear();const ytd=getBrokerRunningYtd(broker.id,pmtYear,pmt.id);brokerPaid+=calcSplit(ytd,pmt.amount*share,getBrokerOverridePct(broker.id)).brokerAmount;}
+        const grossComm=(tx.totalCommission||0)*share;
+        const effSplit=getCurrentTierLabel(getBrokerRunningYtd(broker.id,effSplitYear,null));
+        totTV+=(tx.transactionValue||0)*share;totDue+=grossComm;totRec+=grossRec;totBN+=brokerPaid;totAR+=pendAR;
+
+        if(firstForBroker){
+          const bhr=ws.addRow([broker.name,'','','','','','','']);
+          ws.mergeCells(`A${rowIdx}:H${rowIdx}`);
+          bhr.getCell(1).font={bold:true,size:11,color:{argb:'FF'+WHITE}};
+          bhr.getCell(1).fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};
+          ws.getRow(rowIdx).height=18;
+          rowIdx++;firstForBroker=false;
+        }
+
+        const dr=ws.addRow([tx.propertyAddress||'',tx.clientName||'',(tx.transactionValue||0)*share,grossComm,grossRec,effSplit,brokerPaid,pendAR]);
+        [3,4,5,7,8].forEach(c=>{dr.getCell(c).numFmt=currFmt;dr.getCell(c).alignment={horizontal:'right'};});
+        dr.getCell(8).font={color:{argb:'FF'+RED}};
+        const isEven=rowIdx%2===0;
+        dr.eachCell({includeEmpty:true},cell=>{cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+(isEven?'F0F4F8':'FFFFFF')}};cell.font=cell.font||{size:10};});
+        ws.getRow(rowIdx).height=16;rowIdx++;
+      }
+    }
+
+    ws.addRow([]);rowIdx++;
+    const tr=ws.addRow(['TOTAL','',totTV,totDue,totRec,'',totBN,totAR]);
+    tr.eachCell({includeEmpty:true},c=>{c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};c.font={bold:true,size:10,color:{argb:'FF'+WHITE}};});
+    [3,4,5,7,8].forEach(c=>{tr.getCell(c).numFmt=currFmt;tr.getCell(c).alignment={horizontal:'right'};});
+
+    ws.views=[{state:'frozen',ySplit:3}];
+    const buf=await wb.xlsx.writeBuffer();
+    triggerDownload(new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),
+      `BrokerAudit_${brokerLabel.replace(/\s+/g,'_')}_${filter.label.replace(/\s+/g,'_')}.xlsx`);
+  } catch(err) {
+    console.error('Excel export failed:', err);
+    alert('Excel export failed: ' + err.message + '\n\nIf this persists, check your internet connection (the Excel library loads from a CDN).');
   }
-
-  // Totals
-  ws.addRow([]);rowIdx++;
-  const tr=ws.addRow(['TOTAL','',totTV,totDue,totRec,'',totBN,totAR]);
-  tr.eachCell({includeEmpty:true},c=>{c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};c.font={bold:true,size:10,color:{argb:'FF'+WHITE}};});
-  [3,4,5,7,8].forEach(c=>{tr.getCell(c).numFmt=currFmt;tr.getCell(c).alignment={horizontal:'right'};});
-
-  ws.views=[{state:'frozen',ySplit:3}];
-  const buf=await wb.xlsx.writeBuffer();
-  const blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');a.href=url;a.download=`BrokerAudit_${brokerLabel.replace(/\s+/g,'_')}_${year}.xlsx`;a.click();
-  URL.revokeObjectURL(url);
 }
 
 // ── EXCEL EXPORT (Property Type)
 async function downloadTypeXLSX() {
-  const year  =parseInt(document.getElementById('r2-year').value)||state.settings.fiscalYear;
-  const period=document.getElementById('r2-period').value;
+  const filter = parsePeriodFilter(document.getElementById('r2-year').value);
+  const period = filter.isTTM ? '' : document.getElementById('r2-period').value;
   const QM={Q1:[1,2,3],Q2:[4,5,6],Q3:[7,8,9],Q4:[10,11,12]};
   const types=['Retail','Industrial','Office','Special Purpose','Land'];
+  const periodLabel = filter.isTTM ? 'Last 12 Months' : (period||'Full Year');
 
-  if(typeof ExcelJS==='undefined'){
-    await new Promise((res,rej)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';s.onload=res;s.onerror=rej;document.head.appendChild(s);});
+  function inPeriod(dateStr) {
+    if (!dateStr) return false;
+    const d = new Date(dateStr+'T12:00:00');
+    if (filter.isTTM) return d >= filter.ttmCutoff;
+    if (d.getFullYear()!==filter.year) return false;
+    if (period) { const m=d.getMonth()+1; return (QM[period]||[]).includes(m); }
+    return true;
   }
 
-  const wb=new ExcelJS.Workbook();
-  const NAVY='1a3a5c',RED='C8102E',WHITE='FFFFFF';
+  try {
+    if(typeof ExcelJS==='undefined'){
+      await new Promise((res,rej)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';s.onload=res;s.onerror=()=>rej(new Error('Could not load ExcelJS from CDN'));document.head.appendChild(s);});
+    }
 
-  // Sheet 1: Detail
-  const ws=wb.addWorksheet('Transaction Detail');
-  ws.mergeCells('A1:F1');
-  const t1=ws.getCell('A1');
-  t1.value=`${state.settings.companyName} — Property Type Report (${year} ${period||'Full Year'})`;
-  t1.font={bold:true,size:13,color:{argb:'FF'+WHITE}};
-  t1.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};
-  t1.alignment={horizontal:'center',vertical:'middle'};
+    const wb=new ExcelJS.Workbook();
+    const NAVY='1a3a5c',RED='C8102E',WHITE='FFFFFF';
+
+    // Sheet 1: Detail
+    const ws=wb.addWorksheet('Transaction Detail');
+    ws.mergeCells('A1:F1');
+    const t1=ws.getCell('A1');
+    t1.value=`${state.settings.companyName} — Property Type Report (${filter.label} ${period||''})`.trim();
+    t1.font={bold:true,size:13,color:{argb:'FF'+WHITE}};
+    t1.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};
+    t1.alignment={horizontal:'center',vertical:'middle'};
   ws.getRow(1).height=26;
 
   const hdr=ws.addRow(['Property Address','Property Type','Lease or Sale','Size (Sq Ft)','Transaction Value','Gross Comm Due']);
@@ -2831,13 +3096,15 @@ async function downloadTypeXLSX() {
     ws.getRow(rowIdx).height=16;
   }
 
-  ws.views=[{state:'frozen',ySplit:2}];
+    ws.views=[{state:'frozen',ySplit:2}];
 
-  const buf=await wb.xlsx.writeBuffer();
-  const blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');a.href=url;a.download=`PropertyTypeReport_${year}_${period||'FullYear'}.xlsx`;a.click();
-  URL.revokeObjectURL(url);
+    const buf=await wb.xlsx.writeBuffer();
+    triggerDownload(new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),
+      `PropertyTypeReport_${filter.label.replace(/\s+/g,'_')}${period?'_'+period:''}.xlsx`);
+  } catch(err) {
+    console.error('Excel export failed:', err);
+    alert('Excel export failed: ' + err.message + '\n\nIf this persists, check your internet connection (the Excel library loads from a CDN).');
+  }
 }
 
 // ============================================================
