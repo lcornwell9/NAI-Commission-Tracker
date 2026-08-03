@@ -1935,17 +1935,17 @@ function previewCleanupStalePending() {
     const actionLabel   = hasRec ? 'strip pending only' : 'delete entirely';
     const actionToggle  = !hasRec
       ? `<button class="stale-action-btn" data-id="${t.id}" data-action="delete"
-           onclick="event.stopPropagation();toggleStaleAction(this)"
-           style="font-size:10px;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:#fff;cursor:pointer;color:var(--danger);white-space:nowrap">
-           🗑 delete entirely</button>`
-      : `<span style="font-size:10px;color:var(--muted)">strip pending only</span>`;
+           onclick="toggleStaleAction(event,this)"
+           style="font-size:11px;padding:3px 8px;border-radius:12px;border:1px solid var(--danger);background:#fff2f2;cursor:pointer;color:var(--danger);white-space:nowrap;font-weight:600;line-height:1.4">
+           🗑 delete entirely — tap to strip instead</button>`
+      : `<span style="font-size:11px;color:var(--muted);font-style:italic">✂ strip pending only</span>`;
     return `<div class="stale-row" data-id="${t.id}" data-selected="1" data-action="${defaultAction}"
       onclick="toggleStaleRow(this)"
-      style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;background:var(--bg-subtle)">
+      style="display:flex;align-items:center;gap:10px;padding:10px 10px;border-bottom:1px solid var(--border);cursor:pointer;background:var(--bg-subtle)">
       <div class="stale-check" style="width:22px;height:22px;border-radius:4px;border:2px solid var(--navy);background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0">✓</div>
       <div style="flex:1;min-width:0">
         <div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.propertyAddress||'—')}</div>
-        <div style="font-size:11px;margin-top:2px">${t.fiscalYear||'?'} · ${actionToggle}</div>
+        <div style="margin-top:4px">${actionToggle}</div>
       </div>
       <div style="font-family:monospace;font-size:13px;color:var(--danger);flex-shrink:0">${fmtD(pendAmt)}</div>
     </div>`;
@@ -1972,18 +1972,23 @@ function previewCleanupStalePending() {
   updateStaleTotal();
 }
 
-function toggleStaleAction(btn) {
+function toggleStaleAction(e, btn) {
+  e.stopPropagation();
   const row = btn.closest('.stale-row');
   const cur = btn.dataset.action;
   if (cur === 'delete') {
     btn.dataset.action = 'strip';
-    btn.textContent = '✂ strip pending only';
+    btn.textContent = '✂ strip pending only — tap to delete instead';
     btn.style.color = 'var(--navy)';
+    btn.style.border = '1px solid var(--navy)';
+    btn.style.background = '#f0f4ff';
     if (row) row.dataset.action = 'strip';
   } else {
     btn.dataset.action = 'delete';
-    btn.textContent = '🗑 delete entirely';
+    btn.textContent = '🗑 delete entirely — tap to strip instead';
     btn.style.color = 'var(--danger)';
+    btn.style.border = '1px solid var(--danger)';
+    btn.style.background = '#fff2f2';
     if (row) row.dataset.action = 'delete';
   }
 }
