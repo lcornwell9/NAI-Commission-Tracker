@@ -2412,16 +2412,12 @@ function renderReports(mc) {
 
   <!-- Report 3: Insurance / Transaction Size -->
   <div class="card" style="margin-bottom:20px">
-    <div class="card-header"><div class="card-title">🛡️ Insurance Summary</div></div>
+    <div class="card-header"><div class="card-title">🛡️ Insurance Summary (E&amp;O Application)</div></div>
     <div class="card-body">
-      <div class="form-row cols-2">
-        <div class="form-group"><label>Year</label>
-          <select id="r3-year">${yearOpts}</select>
-        </div>
-        <div class="form-group" style="display:flex;align-items:flex-end;gap:8px">
-          <button class="btn btn-navy btn-sm" onclick="generateInsuranceReport()">Generate</button>
-          <button class="btn btn-ghost btn-sm" onclick="downloadInsuranceXLSX()">⬇ Excel</button>
-        </div>
+      <div class="alert alert-info" style="margin-bottom:12px">Mirrors the Travelers E&amp;O application (Questions 6 &amp; 7). Periods are calculated automatically as rolling 12-month windows — no fiscal year needed.</div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-navy btn-sm" onclick="generateInsuranceReport()">Generate</button>
+        <button class="btn btn-ghost btn-sm" onclick="downloadInsuranceXLSX()">⬇ Excel</button>
       </div>
       <div id="r3-output"></div>
     </div>
@@ -2663,99 +2659,156 @@ function generateTypeReport() {
 }
 
 // ── INSURANCE / TRANSACTION SIZE REPORT
-function buildInsuranceData(filter) {
-  const THRESHOLD = 1_000_000;
-  const under = { count:0, tv:0, grossDue:0, txs:[] };
-  const over  = { count:0, tv:0, grossDue:0, txs:[] };
+// Builds data for the Travelers E&O application Questions 6 & 7.
+// current = most recent 12 months; prior = the 12 months before that.
+function buildInsuranceData() {
+  const now = new Date();
+  const cutCurrent = new Date(now); cutCurrent.setFullYear(cutCurrent.getFullYear()-1);
+  const cutPrior   = new Date(now); cutPrior.setFullYear(cutPrior.getFullYear()-2);
+
+  const inCurrent = d => d && new Date(d+'T12:00:00') >= cutCurrent;
+  const inPrior   = d => d && new Date(d+'T12:00:00') >= cutPrior && new Date(d+'T12:00:00') < cutCurrent;
+
+  // Categories matching Question 6 of the E&O application
+  const cats = {
+    leasing: { label:'Commercial Leasing',         current:{count:0,gross:0,txs:[]}, prior:{count:0,gross:0,txs:[]} },
+    sales:   { label:'Commercial Sales',            current:{count:0,gross:0,txs:[]}, prior:{count:0,gross:0,txs:[]} },
+    land:    { label:'Commercial Sales of Land & Lots', current:{count:0,gross:0,txs:[]}, prior:{count:0,gross:0,txs:[]} },
+    other:   { label:'Other / BOV / Referral',     current:{count:0,gross:0,txs:[]}, prior:{count:0,gross:0,txs:[]} },
+  };
 
   for (const tx of state.transactions) {
-    // Include transaction if it has any payment (received in period OR still pending)
-    const hasRecInPeriod = tx.payments.some(p => pmtInFilter(p, filter));
-    const hasPending     = tx.payments.some(p => p.status === 'pending');
-    if (!hasRecInPeriod && !hasPending) continue;
+    const ls = (tx.leaseSale||'').toLowerCase();
+    const tp = (tx.type||'').toLowerCase();
 
-    const tv  = tx.transactionValue || 0;
-    const due = tx.totalCommission  || 0;
-    const bucket = tv <= THRESHOLD ? under : over;
-    bucket.count++;
-    bucket.tv      += tv;
-    bucket.grossDue += due;
-    bucket.txs.push(tx);
+    let cat;
+    if (tp === 'land')            cat = cats.land;
+    else if (ls.includes('lease')) cat = cats.leasing;
+    else if (ls.includes('sale'))  cat = cats.sales;
+    else                           cat = cats.other;
+
+    const hasCurrRec = tx.payments.some(p=>p.status==='received' && inCurrent(p.receivedDate));
+    const hasPend    = tx.payments.some(p=>p.status==='pending');
+    const hasPriorRec= tx.payments.some(p=>p.status==='received' && inPrior(p.receivedDate));
+
+    const inCurrentPeriod = hasCurrRec || hasPend;
+    const inPriorPeriod   = hasPriorRec && !inCurrentPeriod; // don't double-count
+
+    if (inCurrentPeriod) { cat.current.count++; cat.current.gross += tx.totalCommission||0; cat.current.txs.push(tx); }
+    if (inPriorPeriod)   { cat.prior.count++;   cat.prior.gross   += tx.totalCommission||0; cat.prior.txs.push(tx);   }
   }
-  return { under, over, THRESHOLD };
+
+  // Question 7 size buckets — current period only
+  const size = { under:{count:0,txs:[]}, over:{count:0,txs:[]} };
+  const seenSize = new Set();
+  for (const cat of Object.values(cats)) {
+    for (const tx of cat.current.txs) {
+      if (seenSize.has(tx.id)) continue;
+      seenSize.add(tx.id);
+      const bucket = (tx.transactionValue||0) <= 1_000_000 ? size.under : size.over;
+      bucket.count++; bucket.txs.push(tx);
+    }
+  }
+
+  const fmt1 = d => d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  const currentLabel = `${fmt1(cutCurrent)} – ${fmt1(now)}`;
+  const priorLabel   = `${fmt1(cutPrior)} – ${fmt1(cutCurrent)}`;
+
+  return { cats, size, currentLabel, priorLabel };
 }
 
 function generateInsuranceReport() {
-  const filter = parsePeriodFilter(document.getElementById('r3-year').value);
-  const { under, over, THRESHOLD } = buildInsuranceData(filter);
-  const total = { count: under.count+over.count, tv: under.tv+over.tv, grossDue: under.grossDue+over.grossDue };
+  const { cats, size, currentLabel, priorLabel } = buildInsuranceData();
 
-  function txRows(txList) {
-    return txList.sort((a,b)=>(b.transactionValue||0)-(a.transactionValue||0))
-      .map(tx=>{
-        const ls = tx.leaseSale||'—';
-        const tp = tx.type||'—';
-        const recAmt = tx.payments.filter(p=>p.status==='received').reduce((s,p)=>s+p.amount,0);
-        const pendAmt = tx.payments.filter(p=>p.status==='pending').reduce((s,p)=>s+p.amount,0);
-        return `<tr>
-          <td>${esc(tx.propertyAddress||'—')}</td>
-          <td>${esc(tx.clientName||'—')}</td>
-          <td>${esc(tp)}</td>
-          <td>${esc(ls)}</td>
-          <td class="td-mono">${fmtD(tx.transactionValue||0)}</td>
-          <td class="td-mono">${fmtD(tx.totalCommission||0)}</td>
-          <td class="td-mono" style="color:var(--success)">${recAmt>0?fmtD(recAmt):'—'}</td>
-          <td class="td-mono" style="color:${pendAmt>0?'var(--danger)':'var(--muted)'}">${pendAmt>0?fmtD(pendAmt):'—'}</td>
-        </tr>`;
-      }).join('');
+  // Question 6 table rows
+  let q6Rows = '';
+  let totCurrCount=0, totCurrGross=0, totPriorGross=0;
+  for (const [key, cat] of Object.entries(cats)) {
+    if (key==='other' && cat.current.count===0 && cat.prior.count===0) continue;
+    q6Rows += `<tr>
+      <td>${cat.label}</td>
+      <td class="td-mono" style="text-align:center">${cat.current.count||'—'}</td>
+      <td class="td-mono">${cat.current.gross>0?fmtD(cat.current.gross):'—'}</td>
+      <td class="td-mono">${cat.prior.gross>0?fmtD(cat.prior.gross):'—'}</td>
+    </tr>`;
+    totCurrCount += cat.current.count;
+    totCurrGross += cat.current.gross;
+    totPriorGross += cat.prior.gross;
   }
 
-  const colHdrs = `<tr><th>Property Address</th><th>Client</th><th>Type</th><th>Lease/Sale</th>
-    <th class="td-mono">TX Value</th><th class="td-mono">Gross Comm</th>
-    <th class="td-mono">Received</th><th class="td-mono">Pending AR</th></tr>`;
+  // Detail rows for each category
+  function detailRows(txList) {
+    return [...txList].sort((a,b)=>(b.transactionValue||0)-(a.transactionValue||0)).map(tx=>`
+      <tr>
+        <td>${esc(tx.propertyAddress||'—')}</td>
+        <td>${esc(tx.clientName||'—')}</td>
+        <td>${esc(tx.type||'—')}</td>
+        <td class="td-mono">${fmtD(tx.transactionValue||0)}</td>
+        <td class="td-mono">${fmtD(tx.totalCommission||0)}</td>
+      </tr>`).join('');
+  }
+  const detailHdr = `<thead><tr><th>Property</th><th>Client</th><th>Type</th><th class="td-mono">TX Value</th><th class="td-mono">Gross Comm</th></tr></thead>`;
+
+  let detailSections = '';
+  for (const [key, cat] of Object.entries(cats)) {
+    if (cat.current.txs.length === 0) continue;
+    detailSections += `
+      <div style="font-weight:600;font-size:12px;color:var(--navy);margin:14px 0 4px">${cat.label} — Current Period (${cat.current.count} transactions)</div>
+      <div class="table-wrap"><table>${detailHdr}<tbody>${detailRows(cat.current.txs)}</tbody></table></div>`;
+  }
 
   document.getElementById('r3-output').innerHTML = `
-    <div style="margin-top:14px">
-      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
-        <div style="flex:1;min-width:180px;background:var(--bg-subtle);border-radius:8px;padding:16px 20px;border-left:4px solid var(--navy)">
-          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:4px">≤ $1,000,000</div>
-          <div style="font-size:28px;font-weight:800;color:var(--navy)">${under.count}</div>
-          <div style="font-size:12px;color:var(--muted);margin-top:4px">transactions</div>
-          <div style="font-size:13px;font-weight:600;margin-top:8px">${fmtD(under.grossDue)} gross comm</div>
-          <div style="font-size:11px;color:var(--muted)">${fmtD(under.tv)} total TX value</div>
+    <div style="margin-top:16px">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:12px">
+        <strong>Current period:</strong> ${currentLabel} &nbsp;|&nbsp; <strong>Prior period:</strong> ${priorLabel}
+      </div>
+
+      <div style="font-weight:700;font-size:13px;color:var(--navy);margin-bottom:6px">Question 6 — Gross Commissions &amp; Fees</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Report amounts BEFORE split with brokers. Do not report property values.</div>
+      <div class="table-wrap" style="margin-bottom:20px">
+        <table>
+          <thead><tr>
+            <th>Service</th>
+            <th style="text-align:center">No. of Transactions<br><span style="font-weight:400;font-size:10px">(current period)</span></th>
+            <th class="td-mono">Gross Comm &amp; Fees<br><span style="font-weight:400;font-size:10px">${currentLabel}</span></th>
+            <th class="td-mono">Gross Comm &amp; Fees<br><span style="font-weight:400;font-size:10px">${priorLabel}</span></th>
+          </tr></thead>
+          <tbody>${q6Rows}</tbody>
+          <tfoot><tr style="background:var(--navy);color:#fff;font-weight:700">
+            <td>TOTALS</td>
+            <td style="text-align:center">${totCurrCount}</td>
+            <td class="td-mono">${fmtD(totCurrGross)}</td>
+            <td class="td-mono">${fmtD(totPriorGross)}</td>
+          </tr></tfoot>
+        </table>
+      </div>
+
+      <div style="font-weight:700;font-size:13px;color:var(--navy);margin-bottom:6px">Question 7 — Transaction Size (current period)</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:20px">
+        <div style="flex:1;min-width:160px;background:var(--bg-subtle);border-radius:8px;padding:14px 18px;border-left:4px solid var(--navy)">
+          <div style="font-size:11px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">≤ $1,000,000</div>
+          <div style="font-size:32px;font-weight:800;color:var(--navy);line-height:1">${size.under.count}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">commercial transactions</div>
         </div>
-        <div style="flex:1;min-width:180px;background:var(--bg-subtle);border-radius:8px;padding:16px 20px;border-left:4px solid var(--red)">
-          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:4px">&gt; $1,000,000</div>
-          <div style="font-size:28px;font-weight:800;color:var(--navy)">${over.count}</div>
-          <div style="font-size:12px;color:var(--muted);margin-top:4px">transactions</div>
-          <div style="font-size:13px;font-weight:600;margin-top:8px">${fmtD(over.grossDue)} gross comm</div>
-          <div style="font-size:11px;color:var(--muted)">${fmtD(over.tv)} total TX value</div>
+        <div style="flex:1;min-width:160px;background:var(--bg-subtle);border-radius:8px;padding:14px 18px;border-left:4px solid var(--red)">
+          <div style="font-size:11px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">&gt; $1,000,000</div>
+          <div style="font-size:32px;font-weight:800;color:var(--navy);line-height:1">${size.over.count}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">commercial transactions</div>
         </div>
-        <div style="flex:1;min-width:180px;background:var(--navy);border-radius:8px;padding:16px 20px">
-          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.7);margin-bottom:4px">All Transactions</div>
-          <div style="font-size:28px;font-weight:800;color:#fff">${total.count}</div>
-          <div style="font-size:12px;color:rgba(255,255,255,.7);margin-top:4px">transactions</div>
-          <div style="font-size:13px;font-weight:600;margin-top:8px;color:#fff">${fmtD(total.grossDue)} gross comm</div>
-          <div style="font-size:11px;color:rgba(255,255,255,.7)">${fmtD(total.tv)} total TX value</div>
+        <div style="flex:1;min-width:160px;background:var(--navy);border-radius:8px;padding:14px 18px">
+          <div style="font-size:11px;text-transform:uppercase;color:rgba(255,255,255,.7);margin-bottom:4px">Total</div>
+          <div style="font-size:32px;font-weight:800;color:#fff;line-height:1">${size.under.count+size.over.count}</div>
+          <div style="font-size:11px;color:rgba(255,255,255,.7);margin-top:4px">commercial transactions</div>
         </div>
       </div>
 
-      ${over.count > 0 ? `
-      <div style="font-weight:600;font-size:13px;color:var(--navy);margin-bottom:6px">Transactions &gt; $1,000,000 (${over.count})</div>
-      <div class="table-wrap" style="margin-bottom:20px"><table>
-        <thead>${colHdrs}</thead><tbody>${txRows(over.txs)}</tbody>
-      </table></div>` : ''}
-
-      <div style="font-weight:600;font-size:13px;color:var(--navy);margin-bottom:6px">Transactions ≤ $1,000,000 (${under.count})</div>
-      <div class="table-wrap"><table>
-        <thead>${colHdrs}</thead><tbody>${txRows(under.txs)}</tbody>
-      </table></div>
+      <div style="font-weight:700;font-size:13px;color:var(--navy);margin-bottom:4px">Transaction Detail — Current Period</div>
+      ${detailSections}
     </div>`;
 }
 
 async function downloadInsuranceXLSX() {
-  const filter = parsePeriodFilter(document.getElementById('r3-year').value);
-  const { under, over, THRESHOLD } = buildInsuranceData(filter);
+  const { cats, size, currentLabel, priorLabel } = buildInsuranceData();
   try {
     if(typeof ExcelJS==='undefined'){
       await new Promise((res,rej)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';s.onload=res;s.onerror=()=>rej(new Error('Could not load ExcelJS from CDN'));document.head.appendChild(s);});
@@ -2764,53 +2817,90 @@ async function downloadInsuranceXLSX() {
     const NAVY='1a3a5c',RED='C8102E',WHITE='FFFFFF';
     const currFmt='"$"#,##0.00';
 
-    function makeSheet(name, bucket, label) {
-      const ws=wb.addWorksheet(name);
-      ws.mergeCells('A1:H1');
-      const t1=ws.getCell('A1');
-      t1.value=`${state.settings.companyName} — ${label} (${filter.label})`;
-      t1.font={bold:true,size:13,color:{argb:'FF'+WHITE}};
-      t1.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+(label.includes('>')?RED:NAVY)}};
-      t1.alignment={horizontal:'center',vertical:'middle'};
-      ws.getRow(1).height=26;
+    // Sheet 1: Q6 summary matching the form
+    const ws1=wb.addWorksheet('Q6 - Gross Commissions');
+    ws1.mergeCells('A1:D1');
+    const h1=ws1.getCell('A1');
+    h1.value=`${state.settings.companyName} — E&O Application — Question 6`;
+    h1.font={bold:true,size:13,color:{argb:'FF'+WHITE}};
+    h1.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};
+    h1.alignment={horizontal:'center',vertical:'middle'};
+    ws1.getRow(1).height=26;
 
-      ws.mergeCells('A2:H2');
-      const t2=ws.getCell('A2');
-      t2.value=`${bucket.count} transactions · Total TX Value: ${fmtD(bucket.tv)} · Gross Commission: ${fmtD(bucket.grossDue)}`;
-      t2.font={size:11,color:{argb:'FF'+WHITE}};
-      t2.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};
-      t2.alignment={horizontal:'center'};
-      ws.getRow(2).height=18;
+    ws1.mergeCells('A2:D2');
+    const h2=ws1.getCell('A2');
+    h2.value=`Show all income BEFORE split with brokers — do not report property values`;
+    h2.font={italic:true,size:10,color:{argb:'FF'+WHITE}};
+    h2.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+RED}};
+    h2.alignment={horizontal:'center'};
+    ws1.getRow(2).height=16;
 
-      const hdr=ws.addRow(['Property Address','Client','Type','Lease/Sale','TX Value','Gross Comm Due','Received','Pending AR']);
-      hdr.eachCell(c=>{c.font={bold:true,size:10,color:{argb:'FF'+WHITE}};c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};c.alignment={horizontal:'center'};});
-      [28,20,14,10,14,14,14,12].forEach((w,i)=>ws.getColumn(i+1).width=w);
+    const q6hdr=ws1.addRow(['Service',`No. of Transactions\n(${currentLabel})`,`Gross Comm & Fees\n${currentLabel}`,`Gross Comm & Fees\n${priorLabel}`]);
+    q6hdr.eachCell(c=>{c.font={bold:true,size:10,color:{argb:'FF'+WHITE}};c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};c.alignment={horizontal:'center',wrapText:true};});
+    ws1.getRow(3).height=30;
+    [32,22,22,22].forEach((w,i)=>ws1.getColumn(i+1).width=w);
 
-      const sorted=[...bucket.txs].sort((a,b)=>(b.transactionValue||0)-(a.transactionValue||0));
-      let rowIdx=4;
-      for(const tx of sorted){
-        const recAmt=tx.payments.filter(p=>p.status==='received').reduce((s,p)=>s+p.amount,0);
-        const pendAmt=tx.payments.filter(p=>p.status==='pending').reduce((s,p)=>s+p.amount,0);
-        const dr=ws.addRow([tx.propertyAddress||'',tx.clientName||'',tx.type||'',tx.leaseSale||'',tx.transactionValue||0,tx.totalCommission||0,recAmt||null,pendAmt||null]);
-        [5,6,7,8].forEach(c=>{if(dr.getCell(c).value!=null){dr.getCell(c).numFmt=currFmt;dr.getCell(c).alignment={horizontal:'right'};}});
-        const isEven=rowIdx%2===0;
-        dr.eachCell({includeEmpty:true},cell=>{cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+(isEven?'F0F4F8':'FFFFFF')}};});
-        ws.getRow(rowIdx).height=16;rowIdx++;
-      }
-
-      ws.addRow([]);
-      const tr=ws.addRow(['TOTAL','','','',bucket.tv,bucket.grossDue,null,null]);
-      tr.eachCell({includeEmpty:true},c=>{c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};c.font={bold:true,size:10,color:{argb:'FF'+WHITE}};});
-      [5,6].forEach(c=>{tr.getCell(c).numFmt=currFmt;tr.getCell(c).alignment={horizontal:'right'};});
-      ws.views=[{state:'frozen',ySplit:3}];
+    let totCt=0,totCur=0,totPri=0,rowIdx=4;
+    for(const [key,cat] of Object.entries(cats)){
+      if(key==='other'&&cat.current.count===0&&cat.prior.count===0)continue;
+      const dr=ws1.addRow([cat.label,cat.current.count||0,cat.current.gross||0,cat.prior.gross||0]);
+      dr.getCell(2).alignment={horizontal:'center'};
+      [3,4].forEach(c=>{dr.getCell(c).numFmt=currFmt;dr.getCell(c).alignment={horizontal:'right'};});
+      const isEven=rowIdx%2===0;
+      dr.eachCell({includeEmpty:true},cell=>{cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+(isEven?'F0F4F8':'FFFFFF')}};});
+      ws1.getRow(rowIdx).height=16;
+      totCt+=cat.current.count;totCur+=cat.current.gross;totPri+=cat.prior.gross;rowIdx++;
     }
+    ws1.addRow([]);rowIdx++;
+    const tot=ws1.addRow(['TOTALS',totCt,totCur,totPri]);
+    tot.eachCell({includeEmpty:true},c=>{c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};c.font={bold:true,size:10,color:{argb:'FF'+WHITE}};});
+    tot.getCell(2).alignment={horizontal:'center'};
+    [3,4].forEach(c=>{tot.getCell(c).numFmt=currFmt;tot.getCell(c).alignment={horizontal:'right'};});
+    ws1.addRow([]);
+    ws1.addRow(['Question 7 — Transaction Size (current period)']);
+    ws1.lastRow.getCell(1).font={bold:true,size:11,color:{argb:'FF'+NAVY}};
+    ws1.addRow(['','≤ $1,000,000',`> $1,000,000`,'Total']);
+    ws1.lastRow.eachCell(c=>{if(c.col>1){c.font={bold:true};c.alignment={horizontal:'center'};}});
+    const sizeRow=ws1.addRow(['Commercial Transactions',size.under.count,size.over.count,size.under.count+size.over.count]);
+    sizeRow.eachCell((c,i)=>{if(i>1)c.alignment={horizontal:'center'};});
+    ws1.views=[{state:'frozen',ySplit:3}];
 
-    makeSheet('Over $1M', over, 'Transactions > $1,000,000');
-    makeSheet('Under $1M', under, 'Transactions ≤ $1,000,000');
+    // Sheet 2: Transaction detail
+    const ws2=wb.addWorksheet('Transaction Detail');
+    ws2.mergeCells('A1:E1');
+    const d1=ws2.getCell('A1');
+    d1.value=`${state.settings.companyName} — Transaction Detail — Current Period (${currentLabel})`;
+    d1.font={bold:true,size:13,color:{argb:'FF'+WHITE}};
+    d1.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};
+    d1.alignment={horizontal:'center',vertical:'middle'};
+    ws2.getRow(1).height=24;
+    [30,22,14,14,14].forEach((w,i)=>ws2.getColumn(i+1).width=w);
+    let rowIdx2=2;
+    for(const [key,cat] of Object.entries(cats)){
+      if(cat.current.txs.length===0)continue;
+      rowIdx2++;
+      ws2.addRow([cat.label]);
+      ws2.mergeCells(`A${rowIdx2}:E${rowIdx2}`);
+      ws2.lastRow.getCell(1).font={bold:true,size:11,color:{argb:'FF'+WHITE}};
+      ws2.lastRow.getCell(1).fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};
+      ws2.getRow(rowIdx2).height=18;rowIdx2++;
+      const hdr=ws2.addRow(['Property Address','Client','Type','TX Value','Gross Comm Due']);
+      hdr.eachCell(c=>{c.font={bold:true,size:10,color:{argb:'FF'+WHITE}};c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+NAVY}};c.alignment={horizontal:'center'};});
+      ws2.getRow(rowIdx2).height=16;rowIdx2++;
+      const sorted=[...cat.current.txs].sort((a,b)=>(b.transactionValue||0)-(a.transactionValue||0));
+      for(const tx of sorted){
+        const dr=ws2.addRow([tx.propertyAddress||'',tx.clientName||'',tx.type||'',tx.transactionValue||0,tx.totalCommission||0]);
+        [4,5].forEach(c=>{dr.getCell(c).numFmt=currFmt;dr.getCell(c).alignment={horizontal:'right'};});
+        const isEven=rowIdx2%2===0;
+        dr.eachCell({includeEmpty:true},cell=>{cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+(isEven?'F0F4F8':'FFFFFF')}};});
+        ws2.getRow(rowIdx2).height=16;rowIdx2++;
+      }
+    }
+    ws2.views=[{state:'frozen',ySplit:1}];
 
     const buf=await wb.xlsx.writeBuffer();
     triggerDownload(new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),
-      `InsuranceSummary_${filter.label.replace(/\s+/g,'_')}.xlsx`);
+      `EO_InsuranceSummary_${new Date().toISOString().slice(0,10)}.xlsx`);
   } catch(err) {
     console.error('Excel export failed:', err);
     alert('Excel export failed: ' + err.message);
