@@ -1920,43 +1920,82 @@ function previewCleanupStalePending() {
     t.lastEditedBy === 'Import' &&
     t.payments.some(p=>p.status==='pending')
   );
-  const pendingAR = stale.reduce((s,t)=>s+t.payments.filter(p=>p.status==='pending').reduce((a,p)=>a+p.amount,0),0);
-  const willDelete = stale.filter(t=>t.payments.every(p=>p.status==='pending')).length; // no received payments at all
-  const willStrip  = stale.length - willDelete;
 
-  const rows = stale.slice(0,20).map(t=>`<tr>
-    <td>${esc(t.propertyAddress||'—')}</td>
-    <td>${t.fiscalYear||'?'}</td>
-    <td class="td-mono" style="color:var(--danger)">${fmtD(t.payments.filter(p=>p.status==='pending').reduce((s,p)=>s+p.amount,0))}</td>
-    <td style="color:var(--muted)">${t.payments.some(p=>p.status==='received')?'Strip pending only':'Delete entirely'}</td>
-  </tr>`).join('');
+  if (stale.length === 0) {
+    document.getElementById('import-preview').innerHTML =
+      '<div class="alert alert-success" style="margin-top:12px">✅ No stale historical pending AR found.</div>';
+    return;
+  }
 
-  const preview = document.getElementById('import-preview');
-  preview.innerHTML = `
-    <div class="alert alert-warning" style="margin-top:12px">
-      <strong>${stale.length} historical transactions</strong> have stale pending AR totaling <strong>${fmtD(pendingAR)}</strong>.<br>
-      ${willDelete} will be deleted entirely (no received payments) · ${willStrip} will have pending stripped but received payments kept.
-    </div>
-    <div style="max-height:200px;overflow-y:auto;margin-bottom:12px">
-      <table><thead><tr><th>Property</th><th>Year</th><th class="td-mono">Stale Pending</th><th>Action</th></tr></thead>
-      <tbody>${rows}${stale.length>20?`<tr><td colspan="4" style="color:var(--muted);text-align:center">…and ${stale.length-20} more</td></tr>`:''}</tbody></table>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-ghost" onclick="document.getElementById('import-preview').innerHTML=''">Back</button>
-      <button class="btn btn-danger" onclick="confirmCleanupStalePending()">Remove Stale Pending AR</button>
+  const rows = stale.map(t => {
+    const pendAmt = t.payments.filter(p=>p.status==='pending').reduce((s,p)=>s+p.amount,0);
+    const hasRec  = t.payments.some(p=>p.status==='received');
+    const action  = hasRec ? 'Strip pending' : 'Delete transaction';
+    return `<tr>
+      <td style="padding:6px 8px"><input type="checkbox" class="stale-chk" data-id="${t.id}" checked></td>
+      <td style="padding:6px 8px">${esc(t.propertyAddress||'—')}</td>
+      <td style="padding:6px 8px;text-align:center">${t.fiscalYear||'?'}</td>
+      <td style="padding:6px 8px;text-align:right;font-family:monospace;color:var(--danger)">${fmtD(pendAmt)}</td>
+      <td style="padding:6px 8px;color:var(--muted);font-size:11px">${action}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('import-preview').innerHTML = `
+    <div style="margin-top:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <span style="font-weight:600;font-size:13px">${stale.length} historical transactions with pending AR</span>
+        <span style="font-size:12px;color:var(--muted)">
+          <label style="cursor:pointer"><input type="checkbox" id="stale-chk-all" checked onchange="document.querySelectorAll('.stale-chk').forEach(c=>c.checked=this.checked);updateStaleTotal()"> Select all</label>
+        </span>
+      </div>
+      <div style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:10px">
+        <table style="width:100%;border-collapse:collapse">
+          <thead style="position:sticky;top:0;background:var(--navy);color:#fff">
+            <tr>
+              <th style="padding:6px 8px;width:32px"></th>
+              <th style="padding:6px 8px;text-align:left">Property</th>
+              <th style="padding:6px 8px;text-align:center">Year</th>
+              <th style="padding:6px 8px;text-align:right">Pending AR</th>
+              <th style="padding:6px 8px;text-align:left">Action</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div id="stale-total" style="font-size:13px;color:var(--muted);margin-bottom:10px"></div>
+      <div class="modal-footer" style="padding:0">
+        <button class="btn btn-ghost" onclick="document.getElementById('import-preview').innerHTML=''">Back</button>
+        <button class="btn btn-danger" onclick="confirmCleanupStalePending()">Remove Selected Pending AR</button>
+      </div>
     </div>`;
+
+  // Wire up checkboxes to update running total
+  document.querySelectorAll('.stale-chk').forEach(c => c.addEventListener('change', updateStaleTotal));
+  updateStaleTotal();
+
+  // Store stale list for confirm step
+  window._staleTxs = stale;
+}
+
+function updateStaleTotal() {
+  const checked = new Set([...document.querySelectorAll('.stale-chk:checked')].map(c=>c.dataset.id));
+  const selected = (window._staleTxs||[]).filter(t=>checked.has(t.id));
+  const total = selected.reduce((s,t)=>s+t.payments.filter(p=>p.status==='pending').reduce((a,p)=>a+p.amount,0),0);
+  const el = document.getElementById('stale-total');
+  if (el) el.textContent = `${selected.length} selected · ${fmtD(total)} pending AR will be removed`;
 }
 
 async function confirmCleanupStalePending() {
-  const thisYear = new Date().getFullYear();
-  // Strip pending payments from prior-year imported transactions
+  const checked = new Set([...document.querySelectorAll('.stale-chk:checked')].map(c=>c.dataset.id));
+  if (checked.size === 0) { alert('No transactions selected.'); return; }
+
   state.transactions = state.transactions.filter(t => {
-    if ((t.fiscalYear||0) < thisYear && t.lastEditedBy === 'Import' && t.payments.some(p=>p.status==='pending')) {
-      t.payments = t.payments.filter(p=>p.status==='received');
-      return t.payments.length > 0; // delete if nothing received at all
-    }
-    return true;
+    if (!checked.has(t.id)) return true; // not selected — leave untouched
+    // Strip pending payments
+    t.payments = t.payments.filter(p => p.status === 'received');
+    return t.payments.length > 0; // delete if nothing received at all
   });
+
   await saveToGist();
   closeModal();
   renderPage();
