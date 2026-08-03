@@ -1883,7 +1883,18 @@ function fillTxFormFromPdf(parsed) {
 // EXCEL IMPORT
 // ============================================================
 function openImportModal() {
+  const thisYear = new Date().getFullYear();
+  // Count stale: prior-year transactions (imported) that still carry pending payments
+  const staleCount = state.transactions.filter(t =>
+    (t.fiscalYear||0) < thisYear &&
+    t.lastEditedBy === 'Import' &&
+    t.payments.some(p=>p.status==='pending')
+  ).length;
+  const staleNote = staleCount > 0
+    ? `<div class="alert alert-warning" style="margin-bottom:10px">⚠️ <strong>${staleCount} historical transaction${staleCount===1?'':'s'}</strong> from prior years still have pending AR (deals may have fallen through). <button class="btn btn-ghost btn-sm" style="margin-left:8px" onclick="previewCleanupStalePending()">Review &amp; Clean Up</button></div>`
+    : '';
   openModal('Import Excel Spreadsheet', `
+    ${staleNote}
     <div class="alert alert-info">Import from any year's NAI Red Transactions spreadsheet. Year is auto-detected from the filename.</div>
     <div class="form-group">
       <label>Import Mode</label>
@@ -1900,6 +1911,55 @@ function openImportModal() {
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="runImport()">Preview Import</button>
     </div>`);
+}
+
+function previewCleanupStalePending() {
+  const thisYear = new Date().getFullYear();
+  const stale = state.transactions.filter(t =>
+    (t.fiscalYear||0) < thisYear &&
+    t.lastEditedBy === 'Import' &&
+    t.payments.some(p=>p.status==='pending')
+  );
+  const pendingAR = stale.reduce((s,t)=>s+t.payments.filter(p=>p.status==='pending').reduce((a,p)=>a+p.amount,0),0);
+  const willDelete = stale.filter(t=>t.payments.every(p=>p.status==='pending')).length; // no received payments at all
+  const willStrip  = stale.length - willDelete;
+
+  const rows = stale.slice(0,20).map(t=>`<tr>
+    <td>${esc(t.propertyAddress||'—')}</td>
+    <td>${t.fiscalYear||'?'}</td>
+    <td class="td-mono" style="color:var(--danger)">${fmtD(t.payments.filter(p=>p.status==='pending').reduce((s,p)=>s+p.amount,0))}</td>
+    <td style="color:var(--muted)">${t.payments.some(p=>p.status==='received')?'Strip pending only':'Delete entirely'}</td>
+  </tr>`).join('');
+
+  const preview = document.getElementById('import-preview');
+  preview.innerHTML = `
+    <div class="alert alert-warning" style="margin-top:12px">
+      <strong>${stale.length} historical transactions</strong> have stale pending AR totaling <strong>${fmtD(pendingAR)}</strong>.<br>
+      ${willDelete} will be deleted entirely (no received payments) · ${willStrip} will have pending stripped but received payments kept.
+    </div>
+    <div style="max-height:200px;overflow-y:auto;margin-bottom:12px">
+      <table><thead><tr><th>Property</th><th>Year</th><th class="td-mono">Stale Pending</th><th>Action</th></tr></thead>
+      <tbody>${rows}${stale.length>20?`<tr><td colspan="4" style="color:var(--muted);text-align:center">…and ${stale.length-20} more</td></tr>`:''}</tbody></table>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="document.getElementById('import-preview').innerHTML=''">Back</button>
+      <button class="btn btn-danger" onclick="confirmCleanupStalePending()">Remove Stale Pending AR</button>
+    </div>`;
+}
+
+async function confirmCleanupStalePending() {
+  const thisYear = new Date().getFullYear();
+  // Strip pending payments from prior-year imported transactions
+  state.transactions = state.transactions.filter(t => {
+    if ((t.fiscalYear||0) < thisYear && t.lastEditedBy === 'Import' && t.payments.some(p=>p.status==='pending')) {
+      t.payments = t.payments.filter(p=>p.status==='received');
+      return t.payments.length > 0; // delete if nothing received at all
+    }
+    return true;
+  });
+  await saveToGist();
+  closeModal();
+  renderPage();
 }
 
 async function runImport() {
@@ -2168,22 +2228,34 @@ async function runImport() {
     }
 
     if (mode === 'addhistory') {
+      const currentYear = new Date().getFullYear();
+      const isHistorical = detectedYear < currentYear;
+
+      // For historical years: strip pending AR — those deals may have since resolved or fallen through.
+      // Only received payments (monthly columns) are reliable history.
+      let processedTxs = newTxs;
+      if (isHistorical) {
+        processedTxs = newTxs
+          .map(tx => ({ ...tx, payments: tx.payments.filter(p => p.status === 'received') }))
+          .filter(tx => tx.payments.length > 0); // drop deals with no received payments at all
+      }
+
       // Build a set of existing (address + client) keys — never overwrite these
       const existingKeys = new Set(
         state.transactions.map(t =>
           (t.propertyAddress||'').toLowerCase().trim() + '|||' + (t.clientName||'').toLowerCase().trim()
         )
       );
-      const toAdd    = newTxs.filter(tx => !existingKeys.has(
+      const toAdd   = processedTxs.filter(tx => !existingKeys.has(
         (tx.propertyAddress||'').toLowerCase().trim() + '|||' + (tx.clientName||'').toLowerCase().trim()
       ));
-      const skipped  = newTxs.length - toAdd.length;
+      const skipped = processedTxs.length - toAdd.length;
       showImportPreview(toAdd, mode, detectedYear, async ()=>{
         state.transactions.push(...toAdd);
         await saveToGist();
         closeModal();
         renderPage();
-      }, skipped);
+      }, skipped, isHistorical);
     } else {
       showImportPreview(newTxs, mode, detectedYear, async ()=>{
         state.transactions.push(...newTxs);
@@ -2195,7 +2267,7 @@ async function runImport() {
   }
 }
 
-function showImportPreview(newTxs, mode, year, onConfirm, skipped=0) {
+function showImportPreview(newTxs, mode, year, onConfirm, skipped=0, isHistorical=false) {
   const recCount  = newTxs.reduce((s,t)=>s+t.payments.filter(p=>p.status==='received').length,0);
   const pendCount = newTxs.reduce((s,t)=>s+t.payments.filter(p=>p.status==='pending').length,0);
   const recTotal  = newTxs.reduce((s,t)=>s+t.payments.filter(p=>p.status==='received').reduce((a,p)=>a+p.amount,0),0);
@@ -2210,6 +2282,9 @@ function showImportPreview(newTxs, mode, year, onConfirm, skipped=0) {
 
   const skippedNote = skipped > 0
     ? `<br><span style="color:var(--success)">✓ ${skipped} already-existing transaction${skipped===1?'':'s'} will be left untouched.</span>`
+    : '';
+  const historicalNote = isHistorical
+    ? `<br><span style="color:var(--muted)">ℹ Pending AR from this historical year was not imported — only confirmed received payments are included.</span>`
     : '';
 
   const noNewNote = newTxs.length === 0
@@ -2232,7 +2307,7 @@ function showImportPreview(newTxs, mode, year, onConfirm, skipped=0) {
     <div class="alert alert-info" style="margin-top:14px">
       <strong>${newTxs.length} transaction${newTxs.length===1?'':'s'} to import</strong> — ${year} · ${modeLabels[mode]||mode}<br>
       ${recCount} received payments totaling ${fmtD(recTotal)} · ${pendCount} pending totaling ${fmtD(pendTotal)}
-      ${skippedNote}
+      ${skippedNote}${historicalNote}
     </div>
     ${noNewNote}
     ${newTxs.length > 0 ? `
