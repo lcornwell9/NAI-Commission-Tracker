@@ -2206,13 +2206,16 @@ async function runImport() {
       state.transactions = [];
       state.brokers = state.brokers.filter(b => b.active); // keep broker records, clear transactions
     }
-    // Collect incoming property addresses to wipe (for Full Year mode)
+    // Collect incoming property addresses to wipe (for Full Year mode only)
     const incomingProps = new Set(Object.values(groups).map(g=>g.property.toLowerCase()));
-    if (mode !== 'replace') {
+    if (mode === 'full') {
+      // Full-year: replace any existing transactions whose address matches the incoming sheet
       state.transactions = state.transactions.filter(t =>
         !t.importedPendingAR && !incomingProps.has((t.propertyAddress||'').toLowerCase())
       );
     }
+    // 'replace' mode already wiped all transactions above
+    // 'addhistory' and 'pending' modes: never remove existing data — purely additive
 
     const newTxs = [];
     for (const g of Object.values(groups)) {
