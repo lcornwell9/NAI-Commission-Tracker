@@ -485,7 +485,9 @@ function getBrokerYtdStats(brokerId, year) {
         allPmts.push({ tx, pmt, share: effectiveShare, date: pmt.receivedDate || '' });
       }
     }
-    if (!seenTx.has(tx.id) && brokerIds.includes(brokerId)) {
+    // Count tx toward selected year only if it has a received payment in that year
+    const hasYearPayment = (tx.payments||[]).some(p => p.status === 'received' && fiscalYearOf(p.receivedDate) === year);
+    if (!seenTx.has(tx.id) && brokerIds.includes(brokerId) && hasYearPayment) {
       seenTx.add(tx.id); txCount++;
       let share = 1;
       if (tx.team && tx.team.length > 0) {
