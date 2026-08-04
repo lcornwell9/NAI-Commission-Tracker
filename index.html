@@ -485,27 +485,28 @@ function getBrokerYtdStats(brokerId, year) {
         allPmts.push({ tx, pmt, share: effectiveShare, date: pmt.receivedDate || '' });
       }
     }
-    // Count tx toward selected year only if it has a received payment in that year
-    const hasYearPayment = (tx.payments||[]).some(p => p.status === 'received' && fiscalYearOf(p.receivedDate) === year);
-    if (!seenTx.has(tx.id) && brokerIds.includes(brokerId) && hasYearPayment) {
-      seenTx.add(tx.id); txCount++;
-      let share = 1;
-      if (tx.team && tx.team.length > 0) {
-        const member = tx.team.find(m => m.brokerId === brokerId);
-        share = member ? (member.pct / 100) : 0;
-      }
-      txValue += (tx.transactionValue || 0) * share;
-    }
   }
   allPmts.sort((a,b) => a.date.localeCompare(b.date));
   let runYtd = 0;
-  for (const { pmt, share } of allPmts) {
+  const seenTxForCount = new Set();
+  for (const { tx, pmt, share } of allPmts) {
     const gross = pmt.amount * share;
     const split = getEffectiveSplit(pmt, brokerId, gross, runYtd, getBrokerOverridePct(brokerId));
     ytdGross     += gross;
     ytdBrokerNet += split.brokerAmount;
     ytdCompanyNet += split.companyAmount;
     runYtd       += gross;
+    // Only count tx once, and only if broker actually earned gross from it this year
+    if (gross > 0 && !seenTxForCount.has(tx.id)) {
+      seenTxForCount.add(tx.id);
+      txCount++;
+      let share2 = 1;
+      if (tx.team && tx.team.length > 0) {
+        const member = tx.team.find(m => m.brokerId === brokerId);
+        share2 = member ? (member.pct / 100) : 0;
+      }
+      txValue += (tx.transactionValue || 0) * share2;
+    }
   }
   return { ytdGross, ytdBrokerNet, ytdCompanyNet, pendingAR, txCount, txValue };
 }
