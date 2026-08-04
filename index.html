@@ -455,16 +455,19 @@ function getBrokerYtdStats(brokerId, year) {
   for (const tx of state.transactions) {
     const brokerIds = getTxBrokerIds(tx);
     if (!brokerIds.includes(brokerId)) continue;
-    for (const pmt of tx.payments) {
-      if (pmt.status === 'pending') {
-          // Use brokerId tag if present, otherwise apply team share
-          if (pmt.brokerId) { if (pmt.brokerId === brokerId) pendingAR += pmt.amount; }
-          else {
-            let ps = 1;
-            if (tx.team && tx.team.length > 0) { const m=tx.team.find(mm=>mm.brokerId===brokerId); ps=m?m.pct/100:1; }
-            pendingAR += pmt.amount * ps;
-          }
-        }
+    // Pending AR: sum ALL pending for this tx, distribute by team share
+    // (avoids asymmetry when per-broker brokerId tags have mismatched amounts)
+    const txPending = (tx.payments||[]).filter(p => p.status === 'pending').reduce((s,p) => s+p.amount, 0);
+    if (txPending > 0) {
+      let ps = 1;
+      if (tx.team && tx.team.length > 0) {
+        const m = tx.team.find(mm => mm.brokerId === brokerId);
+        ps = m ? m.pct/100 : 0;
+      }
+      pendingAR += txPending * ps;
+    }
+
+    for (const pmt of (tx.payments||[])) {
       if (pmt.status === 'received' && fiscalYearOf(pmt.receivedDate) === year) {
         let share = 1;
         if (tx.team && tx.team.length > 0) {
