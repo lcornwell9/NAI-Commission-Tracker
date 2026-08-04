@@ -594,6 +594,7 @@ async function loadFromGist() {
       try {
         const user = state.currentUser;
         state = { ...loaded, currentUser: user, currentPage: state.currentPage, dashYear: loaded.dashYear || state.dashYear };
+        state.transactions = normalizeTxs(state.transactions);
         if (!state.settings) state.settings = {};
         state.settings.gistToken = undefined;
         if (!state.settings.tiers) state.settings.tiers = JSON.parse(JSON.stringify(DEFAULT_TIERS.map(t => ({...t, upTo: t.upTo === Infinity ? null : t.upTo}))));
@@ -986,7 +987,7 @@ function getAvailableYears() {
   const years = new Set([new Date().getFullYear()]);
   for (const tx of state.transactions) {
     if (tx.fiscalYear) years.add(tx.fiscalYear);
-    for (const pmt of tx.payments) {
+    for (const pmt of (tx.payments||[])) {
       const y = fiscalYearOf(pmt.receivedDate);
       if (y) years.add(y);
     }
@@ -3753,10 +3754,15 @@ function saveAndSync() {
   saveToGist();
 }
 
+function normalizeTxs(txs) {
+  if (!Array.isArray(txs)) return [];
+  return txs.map(tx => ({ ...tx, payments: Array.isArray(tx.payments) ? tx.payments : [] }));
+}
+
 function loadLocalData() {
   try {
     const d = JSON.parse(localStorage.getItem('ct-data')||'{}');
-    if (d.transactions) state.transactions = d.transactions;
+    if (d.transactions) state.transactions = normalizeTxs(d.transactions);
     if (d.brokers)      state.brokers      = d.brokers;
     if (d.settings)     state.settings     = { ...state.settings, ...d.settings };
   } catch(e){}
