@@ -2648,7 +2648,20 @@ function renderReports(mc) {
     </div>
   </div>
 
-  <!-- Report 4: Reconciliation -->
+  <!-- Report 4: Top Transactions -->
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-header"><div class="card-title">🏆 Top Transactions by Value</div></div>
+    <div class="card-body">
+      <div class="alert alert-info" style="margin-bottom:12px">Top 5 transactions by deal value per property type, rolling 3-year window.</div>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <button class="btn btn-navy btn-sm" onclick="generateTopTxReport()">Generate</button>
+        <button class="btn btn-ghost btn-sm" onclick="downloadTopTxXLSX()">⬇ Excel</button>
+      </div>
+      <div id="r-toptx-output"></div>
+    </div>
+  </div>
+
+  <!-- Report 5: Reconciliation -->
   <div class="card">
     <div class="card-header"><div class="card-title">🔍 Reconciliation Tool</div></div>
     <div class="card-body">
@@ -3130,6 +3143,143 @@ async function downloadInsuranceXLSX() {
     console.error('Excel export failed:', err);
     alert('Excel export failed: ' + err.message);
   }
+}
+
+// ── TOP TRANSACTIONS BY VALUE
+function buildTopTxData() {
+  const cutoff = new Date();
+  cutoff.setFullYear(cutoff.getFullYear() - 3);
+
+  // Gather transactions active within the 3-year window
+  // A transaction qualifies if it has any payment (received or pending) with a date in window,
+  // or its closingDate/contractDate falls in window
+  const inWindow = tx => {
+    const dates = [
+      tx.closingDate, tx.contractDate,
+      ...(tx.payments||[]).map(p => p.receivedDate).filter(Boolean)
+    ].filter(Boolean);
+    return dates.some(d => new Date(d + 'T12:00:00') >= cutoff);
+  };
+
+  const TYPES = ['Retail','Industrial','Office','Special Purpose','Land','Other'];
+
+  const byType = {};
+  TYPES.forEach(t => byType[t] = []);
+
+  for (const tx of state.transactions) {
+    if (!inWindow(tx)) continue;
+    const raw = (tx.type||'').trim();
+    const bucket = TYPES.includes(raw) ? raw : 'Other';
+    byType[bucket].push(tx);
+  }
+
+  // Sort each bucket by transactionValue desc, keep top 5
+  const TOP = 5;
+  for (const t of TYPES) {
+    byType[t].sort((a,b) => (b.transactionValue||0) - (a.transactionValue||0));
+    byType[t] = byType[t].slice(0, TOP);
+  }
+
+  // Overall top 5 (deduped)
+  const allSorted = [...state.transactions]
+    .filter(inWindow)
+    .sort((a,b) => (b.transactionValue||0) - (a.transactionValue||0))
+    .slice(0, TOP);
+
+  return { byType, allSorted, TYPES, cutoff };
+}
+
+function generateTopTxReport() {
+  const { byType, allSorted, TYPES, cutoff } = buildTopTxData();
+  const cutLabel = cutoff.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  const nowLabel = new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+
+  const txRow = tx => {
+    const brokerIds = getTxBrokerIds(tx);
+    const brokerNames = brokerIds.map(id => state.brokers.find(b=>b.id===id)?.name||'').filter(Boolean).join(', ');
+    const grossRec = (tx.payments||[]).filter(p=>p.status==='received').reduce((s,p)=>s+p.amount,0);
+    return `<tr>
+      <td style="max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(tx.propertyAddress||'—')}</td>
+      <td>${esc(tx.leaseSale||'—')}</td>
+      <td>${esc(brokerNames||'—')}</td>
+      <td class="td-mono">${tx.transactionValue ? fmtD(tx.transactionValue) : '—'}</td>
+      <td class="td-mono">${grossRec > 0 ? fmtD(grossRec) : '—'}</td>
+      <td>${esc(tx.closingDate||tx.contractDate||'—')}</td>
+    </tr>`;
+  };
+
+  const thead = `<thead><tr style="background:var(--navy);color:#fff">
+    <th>Property</th><th>Type</th><th>Broker(s)</th>
+    <th class="td-mono">TX Value</th><th class="td-mono">Gross Comm</th><th>Date</th>
+  </tr></thead>`;
+
+  // Overall section
+  let html = `<div style="font-size:12px;color:var(--muted);margin-bottom:16px">${cutLabel} – ${nowLabel}</div>`;
+  html += `<h4 style="margin:0 0 8px;color:var(--navy)">Overall Top 5</h4>
+  <div class="table-wrap" style="margin-bottom:24px">
+    <table>${thead}<tbody>${allSorted.map(txRow).join('')}</tbody></table>
+  </div>`;
+
+  // Per-type sections
+  for (const t of TYPES) {
+    const rows = byType[t];
+    if (!rows.length) continue;
+    html += `<h4 style="margin:0 0 8px;color:var(--navy)">${t} — Top ${rows.length}</h4>
+    <div class="table-wrap" style="margin-bottom:24px">
+      <table>${thead}<tbody>${rows.map(txRow).join('')}</tbody></table>
+    </div>`;
+  }
+
+  document.getElementById('r-toptx-output').innerHTML = html;
+}
+
+async function downloadTopTxXLSX() {
+  const { byType, allSorted, TYPES, cutoff } = buildTopTxData();
+  const cutLabel = cutoff.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  const nowLabel = new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  try {
+    if (typeof ExcelJS === 'undefined') {
+      await new Promise((res,rej)=>{ const s=document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js'; s.onload=res; s.onerror=()=>rej(new Error('ExcelJS load failed')); document.head.appendChild(s); });
+    }
+    const wb = new ExcelJS.Workbook();
+    const navy = '1a2e4a', white = 'FFFFFF', light = 'F0F4F8';
+    const hdrFill = { type:'pattern', pattern:'solid', fgColor:{argb:'FF'+navy} };
+    const hdrFont = { color:{argb:'FF'+white}, bold:true, size:11 };
+    const addHdr  = (ws, vals) => {
+      const r = ws.addRow(vals);
+      r.eachCell(c=>{ c.fill=hdrFill; c.font=hdrFont; c.alignment={vertical:'middle',wrapText:false}; });
+      r.height = 18;
+    };
+    const cols = ['Property Address','Use Type','Broker(s)','TX Value','Gross Comm Received','Date'];
+    const widths = [40,15,25,18,22,14];
+    const buildSheet = (ws, txs) => {
+      ws.columns = cols.map((h,i)=>({header:h, width:widths[i]}));
+      ws.getRow(1).values = [];
+      addHdr(ws, cols);
+      let shade = false;
+      for (const tx of txs) {
+        const brokerIds = getTxBrokerIds(tx);
+        const brokerNames = brokerIds.map(id=>state.brokers.find(b=>b.id===id)?.name||'').filter(Boolean).join(', ');
+        const grossRec = (tx.payments||[]).filter(p=>p.status==='received').reduce((s,p)=>s+p.amount,0);
+        const r = ws.addRow([tx.propertyAddress||'', tx.leaseSale||'', brokerNames, tx.transactionValue||0, grossRec||0, tx.closingDate||tx.contractDate||'']);
+        if (shade) r.eachCell(c=>{ c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF'+light}}; });
+        [4,5].forEach(ci=>{ r.getCell(ci).numFmt='"$"#,##0.00'; });
+        shade = !shade;
+      }
+    };
+
+    const overall = wb.addWorksheet('Overall Top 5');
+    buildSheet(overall, allSorted);
+
+    for (const t of TYPES) {
+      if (!byType[t].length) continue;
+      const ws = wb.addWorksheet(t.slice(0,31));
+      buildSheet(ws, byType[t]);
+    }
+
+    const buf = await wb.xlsx.writeBuffer();
+    triggerDownload(new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}), `Top-Transactions-${nowLabel.replace(/,/g,'').replace(/ /g,'-')}.xlsx`);
+  } catch(e) { alert('Excel export failed: ' + e.message); }
 }
 
 // ── RECONCILIATION
