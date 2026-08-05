@@ -1309,6 +1309,8 @@ async function saveMarkReceived(txId) {
   closeModal();
   await saveToGist();
   renderPage();
+  // Fire payment notification webhook (non-blocking)
+  firePaymentWebhook(tx, pmt, brokerNet, companyNet, effectiveSplit);
 }
 
 // ── EDIT PAYMENT SPLIT MODAL (manual override)
@@ -3678,6 +3680,25 @@ function renderSettings(mc) {
     </div>
   </div>
 
+  <!-- Notifications -->
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-header"><div class="card-title">🔔 Payment Notifications</div></div>
+    <div class="card-body">
+      <p style="font-size:13px;color:var(--muted);margin:0 0 10px">Paste a webhook URL (from <strong>Make.com</strong>, <strong>Zapier</strong>, or similar) and the tracker will send a notification whenever a payment is marked received. The webhook receives the property address, broker(s), amount, date, and commission split.</p>
+      <div class="form-row cols-2" style="align-items:flex-end">
+        <div class="form-group" style="margin:0">
+          <label>Webhook URL</label>
+          <input type="url" id="s-webhook" placeholder="https://hook.make.com/…  or  https://hooks.zapier.com/…" value="${esc(localStorage.getItem('ct-webhook-url')||'')}">
+        </div>
+        <div style="display:flex;gap:8px;padding-bottom:2px">
+          <button class="btn btn-navy btn-sm" onclick="saveWebhookSetting()">Save</button>
+          <button class="btn btn-ghost btn-sm" onclick="testWebhook()">Send Test</button>
+        </div>
+      </div>
+      <div id="webhook-status" style="margin-top:8px;font-size:12px;color:var(--muted)"></div>
+    </div>
+  </div>
+
   <!-- Data -->
   <div class="card" style="margin-bottom:20px">
     <div class="card-header"><div class="card-title">💾 Data & Cloud Sync</div></div>
@@ -3750,6 +3771,69 @@ async function mergeBrokers() {
   await saveToGist();
   renderPage();
   alert(`Done — "${fromB.name}" merged into "${intoB.name}".`);
+}
+
+// ── WEBHOOK NOTIFICATIONS
+function saveWebhookSetting() {
+  const url = document.getElementById('s-webhook')?.value?.trim() || '';
+  try { localStorage.setItem('ct-webhook-url', url); } catch(e) {}
+  const el = document.getElementById('webhook-status');
+  if (el) el.textContent = url ? '✓ Webhook URL saved.' : 'Webhook cleared.';
+}
+
+async function testWebhook() {
+  const url = localStorage.getItem('ct-webhook-url') || document.getElementById('s-webhook')?.value?.trim();
+  if (!url) { alert('Enter a webhook URL first.'); return; }
+  const el = document.getElementById('webhook-status');
+  if (el) el.textContent = 'Sending test…';
+  const payload = {
+    event: 'payment_received_test',
+    property: '123 Test Street, Oklahoma City, OK',
+    client: 'Test Client',
+    brokers: ['Lauren'],
+    amount: 5000,
+    brokerNet: 3500,
+    companyNet: 1500,
+    split: '70%/30%',
+    dateReceived: new Date().toISOString().slice(0,10),
+    trackerUrl: window.location.href,
+    timestamp: new Date().toISOString(),
+  };
+  try {
+    await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload), mode:'no-cors' });
+    if (el) el.textContent = '✓ Test sent! Check your Make/Zapier scenario for the payload.';
+  } catch(e) {
+    if (el) el.textContent = '⚠ Could not reach the URL — double-check the webhook address.';
+  }
+}
+
+async function firePaymentWebhook(tx, pmt, brokerNet, companyNet, effectiveSplit) {
+  const url = localStorage.getItem('ct-webhook-url');
+  if (!url) return;
+  const brokerIds = getTxBrokerIds(tx);
+  const brokerNames = brokerIds.map(id => state.brokers.find(b=>b.id===id)?.name).filter(Boolean);
+  const payload = {
+    event: 'payment_received',
+    property: tx.propertyAddress || '',
+    client: tx.clientName || '',
+    type: tx.type || '',
+    leaseSale: tx.leaseSale || '',
+    brokers: brokerNames,
+    amount: pmt.amount,
+    brokerNet,
+    companyNet,
+    split: effectiveSplit,
+    dateReceived: pmt.receivedDate,
+    notes: pmt.notes || '',
+    fiscalYear: tx.fiscalYear || '',
+    recordedBy: state.currentUser || '',
+    timestamp: new Date().toISOString(),
+  };
+  try {
+    await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload), mode:'no-cors' });
+  } catch(e) {
+    console.warn('Webhook fire failed:', e);
+  }
 }
 
 async function saveCloudSettings() {
