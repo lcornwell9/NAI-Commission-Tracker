@@ -3800,7 +3800,7 @@ async function testWebhook() {
     timestamp: new Date().toISOString(),
   };
   try {
-    await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+    await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain'}, body:JSON.stringify(payload) });
     if (el) el.textContent = '✓ Test sent! Check your Make/Zapier scenario for the payload.';
   } catch(e) {
     if (el) el.textContent = '⚠ Could not reach the URL — double-check the webhook address.';
@@ -3812,9 +3812,11 @@ async function firePaymentWebhook(tx, pmt, brokerNet, companyNet, effectiveSplit
   if (!url) return;
   const brokerIds = getTxBrokerIds(tx);
   const brokerNames = brokerIds.map(id => state.brokers.find(b=>b.id===id)?.name).filter(Boolean);
+  const address = tx.propertyAddress || tx.address || tx.property || '';
+  console.log('[Webhook] firing for tx:', tx.id, '| address:', address, '| full tx:', tx);
   const payload = {
     event: 'payment_received',
-    property: tx.propertyAddress || '',
+    property: address,
     client: tx.clientName || '',
     type: tx.type || '',
     leaseSale: tx.leaseSale || '',
@@ -3830,7 +3832,7 @@ async function firePaymentWebhook(tx, pmt, brokerNet, companyNet, effectiveSplit
     timestamp: new Date().toISOString(),
   };
   try {
-    await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+    await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain'}, body:JSON.stringify(payload) });
   } catch(e) {
     console.warn('Webhook fire failed:', e);
   }
