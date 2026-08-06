@@ -270,9 +270,11 @@ function resolveBrokerName(raw) {
     if (!b) { b = {id:makeId(), name:canonical, active:true, createdAt:new Date().toISOString()}; state.brokers.push(b); }
     return b;
   }
-  // No alias — try exact, then starts-with
+  // No alias — try exact, starts-with, contains, then reverse-contains (PDF has full name, broker stored as first name)
   return state.brokers.find(b => b.name.toLowerCase() === key)
       || state.brokers.find(b => b.name.toLowerCase().startsWith(key + ' '))
+      || state.brokers.find(b => b.name.toLowerCase().includes(key))
+      || state.brokers.find(b => key.includes(b.name.toLowerCase()) && b.name.length > 3)
       || null;
 }
 
@@ -1762,6 +1764,15 @@ function parsePdfFields(fields, text) {
     const pct  = parseNum(fields[`%${i}`]);
     if (name && pct > 0) result.team.push({ name, pct });
   }
+  // Fallback: if the % field is blank on a single-broker form, the loop above adds nothing.
+  // Check if Team Name1 has a value and no team was built — default to 100%.
+  if (result.team.length === 0) {
+    const fallbackName = (fields['Team Name1'] || '').trim();
+    if (fallbackName) {
+      console.log('[PDF] % field blank, defaulting single broker to 100%:', fallbackName);
+      result.team.push({ name: fallbackName, pct: 100 });
+    }
+  }
 
   // Notes: payment timing info
   const payNote = fields['When will this fee be due'] || '';
@@ -1878,9 +1889,13 @@ function fillTxFormFromPdf(parsed) {
     }
   }
   // Always set primary broker to first matched team member
+  console.log('[PDF] parsed.team:', JSON.stringify(parsed.team));
   if (parsed.team && parsed.team.length > 0) {
-    const first = resolveBrokerName(parsed.team[0]?.name);
+    const rawName = parsed.team[0]?.name;
+    const first = resolveBrokerName(rawName);
+    console.log('[PDF] resolving broker from:', JSON.stringify(rawName), '→', first?.name || 'NOT FOUND');
     if (first) { const el=document.getElementById('tf-broker'); if(el) el.value=first.id; }
+    else console.warn('[PDF] broker not resolved — dropdown left at default. Raw name was:', JSON.stringify(rawName));
   }
 
   // Show a notification
