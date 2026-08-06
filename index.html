@@ -3800,7 +3800,7 @@ async function testWebhook() {
     timestamp: new Date().toISOString(),
   };
   try {
-    await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload), mode:'no-cors' });
+    await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
     if (el) el.textContent = '✓ Test sent! Check your Make/Zapier scenario for the payload.';
   } catch(e) {
     if (el) el.textContent = '⚠ Could not reach the URL — double-check the webhook address.';
@@ -3830,7 +3830,7 @@ async function firePaymentWebhook(tx, pmt, brokerNet, companyNet, effectiveSplit
     timestamp: new Date().toISOString(),
   };
   try {
-    await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload), mode:'no-cors' });
+    await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
   } catch(e) {
     console.warn('Webhook fire failed:', e);
   }
